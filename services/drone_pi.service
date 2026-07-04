@@ -1,0 +1,21 @@
+[Unit]
+Description=Drone Pi Autonomous System
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/drone_pi
+ExecStart=/home/pi/drone_pi/venv/bin/python3 /home/pi/drone_pi/main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Graceful shutdown
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

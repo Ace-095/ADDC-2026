@@ -1,0 +1,24 @@
+# Flight / mission geometry configuration
+# Altitude thresholds and waypoint gate distances used by the state machine.
+
+flight:
+  waypoint_threshold: 5.0              # Distance in metres to consider a waypoint 'reached'
+  approach_altitude_m: 5.0            # Search altitude above ground (m) — QR detection begins here
+  takeoff_altitude_threshold_m: 1.0   # FSM waits for alt > this before transitioning out of TAKEOFF
+
+  # Payload safe-drop altitude window (measured by ultrasonic sensor from ground)
+  release_distance_min_m: 0.20        # Do not release above this height (20cm min, payload must reach ground)
+  release_distance_max_m: 0.40        # Do not release below this height (40cm max, prop wash boundary)
+
+# QR decode handoff configuration
+qr_decode:
+  max_attempts: 120                   # Decode retries before declaring QR unreadable
+  hold_ticks: 40                      # Ticks to hold decoded result before acting (2s at 20Hz)
+
+search:
+  square_size_m: 3.0                 # side length of bounded search square
+  initial_scan_timeout_s: 20.0       # hover-scan duration before bounded search
+  lane_overlap_pct: 0.20             # lawnmower lane overlap
+  position_tolerance_m: 0.3          # arrival tolerance for position setpoints
+  search_timeout_s: 90.0             # hard cap for bounded search phase
+  post_release_climb_altitude_m: 3.0 # ascend target post payload release

@@ -1,0 +1,335 @@
+{
+  "communities": {
+    "0": [
+      "main",
+      "main_dronesystem",
+      "main_dronesystem_init",
+      "main_dronesystem_run",
+      "main_dronesystem_start",
+      "main_dronesystem_stop",
+      "main_main",
+      "main_rationale_129",
+      "main_rationale_33",
+      "main_rationale_83",
+      "main_signal_handler",
+      "vision_qr_decoder",
+      "vision_qr_decoder_qrdecoder",
+      "vision_qr_decoder_qrdecoder_decode",
+      "vision_qr_decoder_qrdecoder_init",
+      "vision_qr_decoder_qrdecoder_reset",
+      "vision_qr_decoder_rationale_1",
+      "vision_qr_decoder_rationale_24",
+      "vision_qr_detector",
+      "vision_qr_detector_qrdetector",
+      "vision_qr_detector_qrdetector_detect",
+      "vision_qr_detector_qrdetector_init",
+      "vision_qr_detector_rationale_1",
+      "vision_qr_detector_rationale_10",
+      "vision_qr_detector_rationale_17"
+    ],
+    "1": [
+      "core_mavlink_interface",
+      "core_mavlink_interface_mavlinkinterface",
+      "core_mavlink_interface_mavlinkinterface_connection_loop",
+      "core_mavlink_interface_mavlinkinterface_discover_port",
+      "core_mavlink_interface_mavlinkinterface_get_message",
+      "core_mavlink_interface_mavlinkinterface_init",
+      "core_mavlink_interface_mavlinkinterface_is_connected",
+      "core_mavlink_interface_mavlinkinterface_send_command_long",
+      "core_mavlink_interface_mavlinkinterface_set_guided_velocity",
+      "core_mavlink_interface_mavlinkinterface_start",
+      "core_mavlink_interface_mavlinkinterface_stop",
+      "core_mavlink_interface_mavlinkinterface_tick",
+      "core_mavlink_interface_rationale_1",
+      "core_mavlink_interface_rationale_105",
+      "core_mavlink_interface_rationale_110",
+      "core_mavlink_interface_rationale_14",
+      "core_mavlink_interface_rationale_140",
+      "core_mavlink_interface_rationale_29",
+      "core_mavlink_interface_rationale_36",
+      "core_mavlink_interface_rationale_47",
+      "core_mavlink_interface_rationale_53",
+      "core_mavlink_interface_rationale_76",
+      "core_mavlink_interface_rationale_87"
+    ],
+    "2": [
+      "core_state_machine_rationale_107",
+      "core_state_machine_rationale_147",
+      "core_state_machine_rationale_209",
+      "core_state_machine_rationale_23",
+      "core_state_machine_rationale_45",
+      "core_state_machine_rationale_66",
+      "core_state_machine_rationale_72",
+      "core_state_machine_rationale_78",
+      "core_state_machine_statemachine",
+      "core_state_machine_statemachine_init",
+      "core_state_machine_statemachine_tick",
+      "core_state_machine_statemachine_tick_alignment",
+      "core_state_machine_statemachine_tick_boot",
+      "core_state_machine_statemachine_tick_guided_hold",
+      "core_state_machine_statemachine_tick_land",
+      "core_state_machine_statemachine_tick_monitor_auto",
+      "core_state_machine_statemachine_tick_qr_decode",
+      "core_state_machine_statemachine_tick_request_guided",
+      "core_state_machine_statemachine_tick_rtl",
+      "core_state_machine_statemachine_tick_vision_search",
+      "core_state_machine_statemachine_transition"
+    ],
+    "3": [
+      "core_flight_control",
+      "core_flight_control_flightcontrol",
+      "core_flight_control_flightcontrol_distance_to_wp",
+      "core_flight_control_flightcontrol_hold_position",
+      "core_flight_control_flightcontrol_init",
+      "core_flight_control_flightcontrol_is_auto_mode",
+      "core_flight_control_flightcontrol_land",
+      "core_flight_control_flightcontrol_rtl",
+      "core_flight_control_flightcontrol_send_qr_text",
+      "core_flight_control_flightcontrol_send_velocity",
+      "core_flight_control_flightcontrol_set_guided_mode",
+      "core_flight_control_rationale_1",
+      "core_flight_control_rationale_10",
+      "core_flight_control_rationale_16",
+      "core_flight_control_rationale_25",
+      "core_flight_control_rationale_44",
+      "core_flight_control_rationale_48",
+      "core_flight_control_rationale_61",
+      "core_flight_control_rationale_70"
+    ],
+    "4": [
+      "vision_camera_manager",
+      "vision_camera_manager_cameramanager",
+      "vision_camera_manager_cameramanager_capture_loop",
+      "vision_camera_manager_cameramanager_get_latest_frame",
+      "vision_camera_manager_cameramanager_init",
+      "vision_camera_manager_cameramanager_start",
+      "vision_camera_manager_cameramanager_start_process",
+      "vision_camera_manager_cameramanager_stop",
+      "vision_camera_manager_cameramanager_stop_process",
+      "vision_camera_manager_rationale_1",
+      "vision_camera_manager_rationale_14",
+      "vision_camera_manager_rationale_29",
+      "vision_camera_manager_rationale_44",
+      "vision_camera_manager_rationale_51",
+      "vision_camera_manager_rationale_76",
+      "vision_camera_manager_rationale_86"
+    ],
+    "5": [
+      "vision_alignment_controller",
+      "vision_alignment_controller_alignmentcontroller",
+      "vision_alignment_controller_alignmentcontroller_compute",
+      "vision_alignment_controller_alignmentcontroller_init",
+      "vision_alignment_controller_alignmentcontroller_reset",
+      "vision_alignment_controller_rationale_1",
+      "vision_alignment_controller_rationale_24",
+      "vision_alignment_controller_rationale_28",
+      "vision_alignment_controller_rationale_9"
+    ],
+    "6": [
+      "vision_allignment",
+      "vision_allignment_alignmentcontroller",
+      "vision_allignment_alignmentcontroller_compute",
+      "vision_allignment_alignmentcontroller_init",
+      "vision_allignment_alignmentcontroller_reset",
+      "vision_allignment_rationale_1",
+      "vision_allignment_rationale_24",
+      "vision_allignment_rationale_28",
+      "vision_allignment_rationale_9"
+    ],
+    "7": [
+      "config_qr_decode",
+      "config_vision",
+      "qr_test_png",
+      "requirements_opencv_python"
+    ],
+    "8": [
+      "core_state_machine",
+      "core_state_machine_rationale_1",
+      "core_state_machine_state",
+      "enum"
+    ],
+    "9": [
+      "config_mavlink",
+      "requirements_pymavlink",
+      "requirements_pyserial"
+    ],
+    "10": [
+      "core_init",
+      "core_init_rationale_1"
+    ],
+    "11": [
+      "config_alignment"
+    ],
+    "12": [
+      "config_camera"
+    ],
+    "13": [
+      "config_flight"
+    ],
+    "14": [
+      "config_system"
+    ],
+    "15": [
+      "core_fallback_manager"
+    ],
+    "16": [
+      "core_payload_control"
+    ],
+    "17": [
+      "core_system_monitor"
+    ],
+    "18": [
+      "requirements_numpy"
+    ],
+    "19": [
+      "utils_filters"
+    ],
+    "20": [
+      "utils_logger"
+    ],
+    "21": [
+      "utils_timers"
+    ],
+    "22": [
+      "vision_payload_mask"
+    ]
+  },
+  "cohesion": {
+    "0": 0.11666666666666667,
+    "1": 0.09090909090909091,
+    "2": 0.18095238095238095,
+    "3": 0.10526315789473684,
+    "4": 0.15,
+    "5": 0.2222222222222222,
+    "6": 0.2222222222222222,
+    "7": 0.6666666666666666,
+    "8": 0.6666666666666666,
+    "9": 0.6666666666666666,
+    "10": 1.0,
+    "11": 1.0,
+    "12": 1.0,
+    "13": 1.0,
+    "14": 1.0,
+    "15": 1.0,
+    "16": 1.0,
+    "17": 1.0,
+    "18": 1.0,
+    "19": 1.0,
+    "20": 1.0,
+    "21": 1.0,
+    "22": 1.0
+  },
+  "gods": [
+    {
+      "id": "core_state_machine_statemachine",
+      "label": "StateMachine",
+      "degree": 17
+    },
+    {
+      "id": "core_mavlink_interface_mavlinkinterface",
+      "label": "MAVLinkInterface",
+      "degree": 15
+    },
+    {
+      "id": "core_flight_control_flightcontrol",
+      "label": "FlightControl",
+      "degree": 14
+    },
+    {
+      "id": "main_dronesystem",
+      "label": "DroneSystem",
+      "degree": 14
+    },
+    {
+      "id": "vision_camera_manager_cameramanager",
+      "label": "CameraManager",
+      "degree": 12
+    },
+    {
+      "id": "vision_alignment_controller_alignmentcontroller",
+      "label": "AlignmentController",
+      "degree": 8
+    },
+    {
+      "id": "vision_qr_decoder_qrdecoder",
+      "label": "QRDecoder",
+      "degree": 7
+    },
+    {
+      "id": "vision_qr_detector_qrdetector",
+      "label": "QRDetector",
+      "degree": 7
+    },
+    {
+      "id": "main_main",
+      "label": "main()",
+      "degree": 5
+    },
+    {
+      "id": "vision_allignment_alignmentcontroller",
+      "label": "AlignmentController",
+      "degree": 5
+    }
+  ],
+  "surprises": [
+    {
+      "source": "DroneSystem",
+      "target": "FlightControl",
+      "source_files": [
+        "main.py",
+        "core/flight_control.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "DroneSystem",
+      "target": "MAVLinkInterface",
+      "source_files": [
+        "main.py",
+        "core/mavlink_interface.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "DroneSystem",
+      "target": "StateMachine",
+      "source_files": [
+        "main.py",
+        "core/state_machine.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "DroneSystem",
+      "target": "AlignmentController",
+      "source_files": [
+        "main.py",
+        "vision/alignment_controller.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "DroneSystem",
+      "target": "CameraManager",
+      "source_files": [
+        "main.py",
+        "vision/camera_manager.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "uses",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    }
+  ],
+  "tokens": {
+    "input": 2089,
+    "output": 994
+  }
+}

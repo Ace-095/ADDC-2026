@@ -1,0 +1,20 @@
+# Vision / QR detection configuration
+#
+# Fix V2 + V8: Threshold reconciliation (Phase 3)
+# ───────────────────────────────────────────────
+# At approach_altitude_m=5.0m, a 21cm QR code subtends ~67.7 pixels on a
+# PiCam3 at 1920px width (FOV ~62.2°). The old min_qr_pixel_width=80 was
+# ABOVE the projected size, making detection impossible at search altitude.
+#
+# Decision: lower pixel threshold to 60px (safely detectable up to ~5.4m).
+# min_qr_area updated to 60×60=3600 to match (old comment "80×80" was wrong).
+
+vision:
+  min_qr_pixel_width: 60        # Min QR bounding-box width in pixels [Fix V2: was 80, exceeded projected size at 5m]
+  min_qr_area: 3600             # Min QR bounding-box area in px² — must equal min_qr_pixel_width² [Fix V8: was 1600/comment 80×80]
+  qr_size_cm: 21.0              # Physical QR code dimension in cm (used for metric distance estimation)
+
+  fail_limit: 1000              # Detection failures before abort (1000 ticks = 50s at 20Hz, enough for a 48s search loop)
+  search_pattern_enabled: true  # Enable spiral/search pattern when QR not found
+  stabilization_strength: 0.6   # Image stabilisation blend factor [0.0–1.0]
+  fusion_enabled: true          # Fuse QR and optical-flow position estimates

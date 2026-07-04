@@ -1,0 +1,87 @@
+{
+  "core/__init__.py": {
+    "mtime": 1769276131.7029088,
+    "ast_hash": "f4116843bde93d0be4c199eea8720c2a",
+    "semantic_hash": "f4116843bde93d0be4c199eea8720c2a"
+  },
+  "core/fallback_manager.py": {
+    "mtime": 1769276131.7054157,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "core/flight_control.py": {
+    "mtime": 1769276131.7155776,
+    "ast_hash": "4ac8cfcec8520fddf3f26bf52f19c186",
+    "semantic_hash": "4ac8cfcec8520fddf3f26bf52f19c186"
+  },
+  "core/mavlink_interface.py": {
+    "mtime": 1769281094.2792873,
+    "ast_hash": "0c7215f5a4ecc0b9e4129019b364ce2a",
+    "semantic_hash": "0c7215f5a4ecc0b9e4129019b364ce2a"
+  },
+  "core/payload_control.py": {
+    "mtime": 1769276131.6915743,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "core/state_machine.py": {
+    "mtime": 1769276131.6989102,
+    "ast_hash": "9c3f00ea465ab1aaa599c82034f47f8f",
+    "semantic_hash": "9c3f00ea465ab1aaa599c82034f47f8f"
+  },
+  "core/system_monitor.py": {
+    "mtime": 1769276131.7114308,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "main.py": {
+    "mtime": 1769276131.736892,
+    "ast_hash": "83912ea3ff11f11707a43c5a6b9a7abc",
+    "semantic_hash": "83912ea3ff11f11707a43c5a6b9a7abc"
+  },
+  "utils/filters.py": {
+    "mtime": 1769276131.6348016,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "utils/logger.py": {
+    "mtime": 1769276131.6312983,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "utils/timers.py": {
+    "mtime": 1769276131.6332924,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "vision/alignment_controller.py": {
+    "mtime": 1769276131.6531594,
+    "ast_hash": "78d35b87c093aa1931cb8f6704833798",
+    "semantic_hash": "78d35b87c093aa1931cb8f6704833798"
+  },
+  "vision/allignment.py": {
+    "mtime": 1769276131.671244,
+    "ast_hash": "78d35b87c093aa1931cb8f6704833798",
+    "semantic_hash": "78d35b87c093aa1931cb8f6704833798"
+  },
+  "vision/camera_manager.py": {
+    "mtime": 1769276131.6572225,
+    "ast_hash": "12e428a13bc0e3d3ed81c21c96d68061",
+    "semantic_hash": "12e428a13bc0e3d3ed81c21c96d68061"
+  },
+  "vision/payload_mask.py": {
+    "mtime": 1769276131.6466231,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "vision/qr_decoder.py": {
+    "mtime": 1769276131.6672451,
+    "ast_hash": "e76ee9854c0ca47e918e982abdd1f9cd",
+    "semantic_hash": "e76ee9854c0ca47e918e982abdd1f9cd"
+  },
+  "vision/qr_detector.py": {
+    "mtime": 1769276131.6622257,
+    "ast_hash": "2a3ad9cc531a61355a8ccbd5d55706fe",
+    "semantic_hash": "2a3ad9cc531a61355a8ccbd5d55706fe"
+  }
+}

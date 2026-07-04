@@ -1,0 +1,16 @@
+# Camera configuration
+# PiCamera3 sensor settings for 1080p high-resolution QR scanning.
+
+camera:
+  width: 1920                   # Frame width in pixels
+  height: 1080                  # Frame height in pixels (1080p)
+  fps: 20                       # Capture frame rate — matches FSM tick_hz
+  buffer_size: 2                # Ring buffer depth (low latency; 2 = double-buffer)
+
+  # Exposure control
+  iso: 100                      # Manual ISO (AnalogueGain = 1.0 → minimum noise)
+  shutter_speed_us: 600         # Fixed shutter 1/1666s — freeze motion at hover speed
+  auto_exposure_adapt: true     # Allow AEC override in variable lighting conditions
+
+  # Optics
+  fov_horizontal_deg: 66.0      # PiCamera3 standard lens horizontal FOV

@@ -1,0 +1,8 @@
+# System configuration
+# Controls the FSM tick rate and runtime mode flags.
+# Use --sitl / --real and --gui / --headless CLI flags on main.py to override at runtime.
+
+system:
+  tick_hz: 20          # FSM update rate in Hz
+  use_sitl: true    # true → connect to tcp:127.0.0.1:5762 (SITL); false → serial port
+  show_gui: true      # true → open OpenCV preview window (requires display)

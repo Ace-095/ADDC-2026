@@ -1,0 +1,30 @@
+# MAVLink interface configuration
+# Controls connection strings, timing behaviour, and payload servo actuation.
+# Dead key removed: reconnect_delay_ticks (was never read by any module — deleted in Phase 3).
+
+mavlink:
+  baud: 57600                        # Serial baud rate (IRL Pixhawk connection)
+  port_real: "/dev/serial0"          # Serial port for Pixhawk 6C on Pi 5
+  port_sitl: "tcp:192.168.122.251:5762"   # SITL MAVProxy TCP endpoint (direct libvirt VM bridge)
+  # ── Phase B transport experiment ──────────────────────────────────────────
+  # To test whether the VM bridge / TCP path causes the 71s latency, start
+  # MAVProxy with an extra UDP output and point the companion at it instead:
+  #
+  #   sim_vehicle.py ... --out udp:127.0.0.1:14551
+  #   (or in MAVProxy CLI: output add udp:127.0.0.1:14551)
+  #
+  # Then swap port_sitl to: "udp:0.0.0.0:14551"
+  # Re-run the mission and compare Phase A [LAT] log lines.
+  # If lag drops dramatically → TCP/VM bridge is the culprit.
+  # If lag stays the same   → message volume/processing is the culprit.
+  # port_sitl_udp_experiment: "udp:0.0.0.0:14551"
+  # ─────────────────────────────────────────────────────────────────────────
+
+  heartbeat_timeout_ticks: 60        # Ticks of silence before declaring link lost
+  reconnect_delay_ticks: 100         # Ticks to wait between reconnect attempts after link loss (100 = 5s at 20Hz)
+
+  # Payload servo (AUX channel 9)
+  payload_servo_channel: 9
+  servo_pwm_open: 1900               # PWM us to release payload
+  servo_pwm_closed: 1500             # PWM us to close/hold payload
+  servo_open_duration_s: 3.0         # Seconds to hold open position before returning

@@ -1,0 +1,14 @@
+# Alignment / visual-servoing configuration
+# PID gains and deadzone for AlignmentController (visual servoing over QR target).
+#
+# Dead keys removed: landing_threshold_cm, centering_timeout_s (Phase 3)
+# Neither was read by any module in the codebase. Removed to eliminate dead config debt.
+# If precision-landing timeout logic is added in a future phase, add centering_timeout_s back here.
+
+alignment:
+  pid_kp: 0.5                   # Proportional gain
+  pid_ki: 0.08                  # Integral gain
+  pid_kd: 0.2                   # Derivative gain
+  max_velocity: 0.8             # Maximum guided-mode velocity command (m/s)
+  center_deadzone_px: 30        # Pixel deadzone radius — errors within this are zeroed [Fix C1/V1]
+  stable_frames_required: 20    # Consecutive in-deadzone frames before declaring 'aligned'
