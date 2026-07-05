@@ -45,6 +45,10 @@ class StateMachine:
         self.guided_request_counter = 0
         self.guided_request_retries = 0  # Number of complete 5s retry cycles exhausted
         self.hold_counter = 0
+
+        # Position reference captured in GUIDED_HOLD after telemetry is confirmed available.
+        # Never set to None silently — only transitions out of GUIDED_HOLD once this is non-None.
+        self.guided_anchor_ned = None
         
         self.vision_fail_limit = config['vision']['fail_limit']
         self.decode_hold_ticks = config['qr_decode']['hold_ticks']
@@ -100,6 +104,10 @@ class StateMachine:
         self.climb_initiated = False
         if new_state == State.REQUEST_GUIDED:
             self.guided_request_retries = 0
+        # Clear stale anchor on GUIDED_HOLD entry so a prior partial capture
+        # from a crashed cycle cannot be reused in a retry scenario.
+        if new_state == State.GUIDED_HOLD:
+            self.guided_anchor_ned = None
         
         # Trigger controller resets if entering tracking modes
         if new_state == State.ALIGNMENT:
@@ -180,16 +188,10 @@ class StateMachine:
         # Check mode confirmation using autopilot-specific HEARTBEAT
         # (GCS HEARTBEATs with custom_mode=0 are filtered out in get_autopilot_heartbeat)
         if self.fc.is_guided_mode():
-            logger.info("GUIDED mode change confirmed by autopilot heartbeat.")
-            
-            # Phase 1: Capture a real position reference at GUIDED entry
-            self.guided_anchor_ned = self.fc.get_local_position()
-            if self.guided_anchor_ned:
-                x0, y0, z0 = self.guided_anchor_ned
-                logger.info(f"Captured LOCAL_POSITION_NED origin: x0={x0:.2f}, y0={y0:.2f}, z0={z0:.2f}")
-            else:
-                logger.warning("Could not capture LOCAL_POSITION_NED origin at GUIDED entry!")
-                
+            logger.info(
+                "GUIDED mode confirmed by autopilot heartbeat. "
+                "Entering GUIDED_HOLD to capture LOCAL_POSITION_NED anchor."
+            )
             self._transition(State.GUIDED_HOLD, tick_count)
             return
 
@@ -205,7 +207,13 @@ class StateMachine:
                 self._transition(State.RTL, tick_count)
 
     def _tick_guided_hold(self, tick_count: int):
-        """Hold position briefly to damp initial mode switch swings."""
+        """Hold position while waiting for LOCAL_POSITION_NED anchor to be confirmed.
+
+        Retries get_local_position() on every tick.  The FSM only advances to
+        INITIAL_SCAN once a non-None anchor is captured AND the minimum settle
+        time has elapsed.  If the hard timeout expires with still no telemetry,
+        the FSM transitions to RTL with a loud error — never silently storing None.
+        """
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
             return
@@ -213,7 +221,42 @@ class StateMachine:
         self.fc.hold_position()
         self.hold_counter += 1
 
-        if self.hold_counter > 40:  # 2 seconds at 20Hz
+        # Attempt anchor capture on every tick until we get a real fix.
+        if self.guided_anchor_ned is None:
+            pos = self.fc.get_local_position()
+            if pos is not None:
+                self.guided_anchor_ned = pos
+                x0, y0, z0 = pos
+                logger.info(
+                    f"Anchor captured in GUIDED_HOLD: "
+                    f"x0={x0:.2f}, y0={y0:.2f}, z0={z0:.2f} "
+                    f"(after {self.hold_counter} ticks)"
+                )
+
+        # Hard timeout: configurable, default 8 s.
+        # If LOCAL_POSITION_NED never arrives we fail loudly rather than silently.
+        anchor_timeout_s = self.cfg.get('flight', {}).get('anchor_capture_timeout_s', 8.0)
+        anchor_timeout_ticks = int(anchor_timeout_s * self.cfg['system']['tick_hz'])
+
+        if self.hold_counter >= anchor_timeout_ticks:
+            if self.guided_anchor_ned is None:
+                logger.error(
+                    f"GUIDED_HOLD: LOCAL_POSITION_NED not received after "
+                    f"{anchor_timeout_s:.1f}s ({self.hold_counter} ticks). "
+                    "Cannot establish position reference — aborting to RTL."
+                )
+                self.fallback.handle_fail(
+                    "GUIDED_HOLD: anchor capture timeout — no LOCAL_POSITION_NED"
+                )
+                self._transition(State.RTL, tick_count)
+            else:
+                self._transition(State.INITIAL_SCAN, tick_count)
+            return
+
+        # Minimum settle (2 s) after anchor captured, before advancing.
+        # This absorbs initial mode-switch momentum before commanding positions.
+        min_settle_ticks = int(2.0 * self.cfg['system']['tick_hz'])
+        if self.guided_anchor_ned is not None and self.hold_counter >= min_settle_ticks:
             self._transition(State.INITIAL_SCAN, tick_count)
 
     def _tick_initial_scan(self, tick_count: int):
@@ -248,7 +291,15 @@ class StateMachine:
             return
 
     def _generate_search_pattern(self):
-        """Generate local NED waypoints for a bounded lawnmower search."""
+        """Generate local NED waypoints for an expanding concentric-square search.
+
+        Produces closed square perimeters at increasing ring sizes, all centered
+        on guided_anchor_ned. Each ring is walked SW→SE→NE→NW→SW so the drone
+        scans near-to-far before moving outward to the next ring.
+
+        Ring sizes are taken from search.search_rings_m config list.
+        Falls back to [1.0, 2.0, square_size_m] when the key is absent.
+        """
         anchor = getattr(self, 'guided_anchor_ned', None)
         if not anchor:
             logger.warning("guided_anchor_ned not set! Falling back to current local position.")
@@ -256,58 +307,50 @@ class StateMachine:
             if not anchor:
                 logger.error("Could not get local position anchor! Defaulting to 0,0,0")
                 anchor = (0.0, 0.0, 0.0)
-            
+
         x0, y0, z0 = anchor
+
+        # Ring sizes: independently tunable list, or derived from square_size_m.
         sq_size = self.cfg['search'].get('square_size_m', 3.0)
-        half_size = sq_size / 2.0
-        
-        alt_m = self.cfg['flight'].get('approach_altitude_m', 5.0)
-        fov_rad = math.radians(self.cfg['camera'].get('fov_horizontal_deg', 66.0))
-        footprint_w = 2.0 * alt_m * math.tan(fov_rad / 2.0)
-        overlap = self.cfg['search'].get('lane_overlap_pct', 0.20)
-        lane_width = footprint_w * (1.0 - overlap)
-        
-        # Guard against zero or negative lane width
-        if lane_width <= 0.1:
-            lane_width = 1.0
-            
-        num_lanes = max(1, int(math.ceil(sq_size / lane_width)))
-        
+        default_rings = [1.0, 2.0, sq_size] if sq_size > 2.0 else [sq_size / 2.0, sq_size]
+        ring_sizes = self.cfg['search'].get('search_rings_m', default_rings)
+
         self.search_waypoints = []
-        # Generate lanes starting from back-left (-half_size, -half_size)
-        start_x = x0 - half_size
-        start_y = y0 - half_size
-        
-        for i in range(num_lanes + 1):
-            x = start_x + (i * lane_width)
-            # Cap at the front boundary
-            if x > x0 + half_size:
-                x = x0 + half_size
-                
-            if i % 2 == 0:
-                self.search_waypoints.append((x, start_y, z0))
-                self.search_waypoints.append((x, y0 + half_size, z0))
-            else:
-                self.search_waypoints.append((x, y0 + half_size, z0))
-                self.search_waypoints.append((x, start_y, z0))
-                
-                
+        for ring_size in ring_sizes:
+            h = ring_size / 2.0
+            # Walk the perimeter clockwise: SW → SE → NE → NW → SW (closed ring)
+            self.search_waypoints.append((x0 - h, y0 - h, z0))  # SW
+            self.search_waypoints.append((x0 + h, y0 - h, z0))  # SE
+            self.search_waypoints.append((x0 + h, y0 + h, z0))  # NE
+            self.search_waypoints.append((x0 - h, y0 + h, z0))  # NW
+            self.search_waypoints.append((x0 - h, y0 - h, z0))  # SW (close)
+
         self.current_wp_idx = 0
-        
-        # Calculate dynamic timeout: distance / speed + margin
+
+        # Dynamic timeout: sequential distance sum scaled by speed + margin.
+        # Same logic as before — works correctly for any waypoint list shape.
         total_dist = 0.0
         curr_x, curr_y = x0, y0
-        for wp_x, wp_y, wp_z in self.search_waypoints:
+        for wp_x, wp_y, _ in self.search_waypoints:
             total_dist += math.sqrt((wp_x - curr_x)**2 + (wp_y - curr_y)**2)
             curr_x, curr_y = wp_x, wp_y
-            
-        speed_m_s = self.cfg['flight'].get('search_speed_m_s', 1.0)
-        margin_s = 15.0 # Give it 15 seconds of slack for turns and arrival settling
+
+        speed_m_s = self.cfg['flight'].get('search_speed_m_s', 0.4)
+        margin_s = 15.0  # Slack for per-waypoint settle time and turns
         timeout_s = (total_dist / speed_m_s) + margin_s
         self.search_timeout_ticks = int(timeout_s * self.cfg['system']['tick_hz'])
-        
-        logger.info(f"Generated {len(self.search_waypoints)} waypoints for {sq_size}m search bounds (Lane width: {lane_width:.2f}m).")
-        logger.info(f"Dynamic SEARCH_SQUARE timeout set to {timeout_s:.1f}s for {total_dist:.1f}m total path.")
+
+        logger.info(
+            f"Generated {len(self.search_waypoints)} waypoints across "
+            f"{len(ring_sizes)} concentric rings {ring_sizes} "
+            f"(total path: {total_dist:.1f}m)."
+        )
+        logger.info(f"Dynamic SEARCH_SQUARE timeout set to {timeout_s:.1f}s.")
+
+        # Apply configured search speed to autopilot before pattern begins.
+        # Without this, ArduPilot uses its internal default (3-5 m/s), too fast
+        # for the downward camera to acquire a 21cm QR reliably at 5m altitude.
+        self.fc.set_search_speed(speed_m_s)
 
     def _tick_search_square(self, tick_count: int):
         """Execute lawnmower pattern in bounded area if initial scan fails."""
@@ -367,32 +410,44 @@ class StateMachine:
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
             return
-            
+
         anchor = getattr(self, 'guided_anchor_ned', None)
         if not anchor:
             logger.warning("No guided anchor found for RETURN_INITIAL. Skipping straight to RTL.")
             self._transition(State.RTL, tick_count)
             return
-            
+
+        # One-shot: cap speed on the first tick so the return leg is also
+        # speed-limited. Must not run every tick — one MAVLink cmd per entry.
+        if tick_count == self.state_entry_tick:
+            return_speed = self.cfg['flight'].get('search_speed_m_s', 0.4)
+            self.fc.set_search_speed(return_speed)
+
         target_x, target_y, target_z = anchor
         self.fc.goto_local_position(target_x, target_y, target_z)
-        
+
         current_pos = self.fc.get_local_position()
         if current_pos:
             cx, cy, cz = current_pos
             dist = math.sqrt((target_x - cx)**2 + (target_y - cy)**2)
             tolerance = self.cfg['search'].get('position_tolerance_m', 0.5)
-            
+
             if dist <= tolerance:
                 logger.warning("Returned to initial GUIDED anchor point. Initiating blind LAND sequence.")
+                normal_speed = self.cfg['flight'].get('normal_speed_m_s', 3.0)
+                self.fc.restore_normal_speed(normal_speed)
+                logger.info("Speed restored before LAND transition.")
                 self._transition(State.LAND, tick_count)
                 return
-                
+
         # Timeout for the return journey
         elapsed_ticks = tick_count - self.state_entry_tick
         timeout_ticks = 30.0 * self.cfg['system']['tick_hz']
         if elapsed_ticks >= timeout_ticks:
             logger.error("RETURN_INITIAL timeout. Initiating blind LAND sequence anyway.")
+            normal_speed = self.cfg['flight'].get('normal_speed_m_s', 3.0)
+            self.fc.restore_normal_speed(normal_speed)
+            logger.info("Speed restored before LAND transition (timeout path).")
             self._transition(State.LAND, tick_count)
 
     def _tick_alignment(self, tick_count: int):
@@ -500,7 +555,8 @@ class StateMachine:
                 err_x_px = cx - img_cx
                 err_y_px = cy - img_cy
                 
-                focal_length_px = w * 0.828
+                fov_rad = math.radians(self.cfg['camera'].get('fov_horizontal_deg', 66.0))
+                focal_length_px = (w / 2.0) / math.tan(fov_rad / 2.0)
                 
                 # Image +Y is down (backward in standard mounting), Image +X is right
                 angle_x = math.atan(err_y_px / focal_length_px)
@@ -536,7 +592,7 @@ class StateMachine:
                 self.climb_initiated = True
                 
             climb_alt = self.cfg['search'].get('post_release_climb_altitude_m', 3.0)
-            current_alt = self.fc.get_altitude()
+            current_alt = self.fc.mav.get_altitude()
             
             if current_alt < climb_alt - 0.3:
                 # Command upward velocity (-Z in NED frame)

@@ -10,8 +10,8 @@
 # min_qr_area updated to 60×60=3600 to match (old comment "80×80" was wrong).
 
 vision:
-  min_qr_pixel_width: 60        # Min QR bounding-box width in pixels [Fix V2: was 80, exceeded projected size at 5m]
-  min_qr_area: 3600             # Min QR bounding-box area in px² — must equal min_qr_pixel_width² [Fix V8: was 1600/comment 80×80]
+  min_qr_pixel_width: 50        # Min QR bounding-box width in pixels [Fix V11: lowered from 60 for better 5m margin at 66° FOV]
+  min_qr_area: 2500             # Min QR bounding-box area in px² — must equal min_qr_pixel_width² [Fix V11]
   qr_size_cm: 21.0              # Physical QR code dimension in cm (used for metric distance estimation)
 
   fail_limit: 1000              # Detection failures before abort (1000 ticks = 50s at 20Hz, enough for a 48s search loop)

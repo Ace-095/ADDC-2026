@@ -5,6 +5,15 @@ flight:
   waypoint_threshold: 5.0              # Distance in metres to consider a waypoint 'reached'
   approach_altitude_m: 5.0            # Search altitude above ground (m) — QR detection begins here
   takeoff_altitude_threshold_m: 1.0   # FSM waits for alt > this before transitioning out of TAKEOFF
+  anchor_capture_timeout_s: 8.0       # GUIDED_HOLD hard limit (s) waiting for LOCAL_POSITION_NED before aborting to RTL
+
+  # Search speed control — sent to autopilot via MAV_CMD_DO_CHANGE_SPEED (cmd 178).
+  # At 5m AGL with 66° FOV the camera footprint is ~4.4m wide.
+  # At 0.4 m/s the drone takes ~11s to cross it (220 frames at 20Hz).
+  # At the autopilot default (~3 m/s) it takes ~1.5s — too fast for reliable QR detection.
+  # Increase search_speed_m_s only after confirming detection works at the current value in SITL.
+  search_speed_m_s: 0.4               # Groundspeed during SEARCH_SQUARE and RETURN_INITIAL (m/s)
+  normal_speed_m_s: 3.0               # Speed restored after RETURN_INITIAL completes, before RTL (m/s)
 
   # Payload safe-drop altitude window (measured by ultrasonic sensor from ground)
   release_distance_min_m: 0.20        # Do not release above this height (20cm min, payload must reach ground)
@@ -16,9 +25,10 @@ qr_decode:
   hold_ticks: 40                      # Ticks to hold decoded result before acting (2s at 20Hz)
 
 search:
-  square_size_m: 3.0                 # side length of bounded search square
+  square_size_m: 3.0                 # Max ring size fallback (m) — used when search_rings_m is absent
+  search_rings_m: [1.0, 2.0, 3.0]    # Concentric ring side-lengths (m), walked inner-first
   initial_scan_timeout_s: 20.0       # hover-scan duration before bounded search
-  lane_overlap_pct: 0.20             # lawnmower lane overlap
+  lane_overlap_pct: 0.20             # [UNUSED — lawnmower removed] kept for reference if reverting
   position_tolerance_m: 0.3          # arrival tolerance for position setpoints
   search_timeout_s: 90.0             # hard cap for bounded search phase
   post_release_climb_altitude_m: 3.0 # ascend target post payload release

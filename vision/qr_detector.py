@@ -93,7 +93,7 @@ class QRDetector:
                     bw = int(barcode.rect.width / zoom_factor)
                     bh = int(barcode.rect.height / zoom_factor)
                     
-                    if (bw * zoom_factor) >= self.min_width_px:
+                    if bw >= self.min_width_px:
                         cx = bx + bw // 2
                         cy = by + bh // 2
                         bbox_pts = np.array([

@@ -96,6 +96,55 @@ class FlightControl:
         """
         return self.mav.set_position_target_local_ned(x, y, z)
 
+    def set_search_speed(self, speed_m_s: float) -> bool:
+        """Cap autopilot groundspeed for slow search pattern scanning.
+
+        Sends MAV_CMD_DO_CHANGE_SPEED (178) so ArduPilot actually flies
+        GUIDED position targets at the configured search speed rather than
+        its internal default (WPNAV_SPEED, typically 3–5 m/s). At 3+ m/s
+        the drone traverses a 4.4m camera footprint in ~1.5s — too fast
+        for the QR detector to acquire a 21cm code reliably.
+
+        Call once per state entry, NOT on every tick.
+
+        Args:
+            speed_m_s: Target groundspeed in m/s (0.3–0.5 recommended for detection)
+        """
+        success = self.mav.send_command_long(
+            178,          # MAV_CMD_DO_CHANGE_SPEED
+            param1=1.0,   # speed_type: 1 = groundspeed
+            param2=float(speed_m_s),
+            param3=-1.0,  # throttle: -1 = no change
+            param4=0.0,   # relative: 0 = absolute speed
+        )
+        if success:
+            logger.info(f"Search speed set to {speed_m_s:.2f} m/s via MAV_CMD_DO_CHANGE_SPEED.")
+        else:
+            logger.warning(f"Failed to set search speed to {speed_m_s:.2f} m/s.")
+        return success
+
+    def restore_normal_speed(self, speed_m_s: float) -> bool:
+        """Restore autopilot groundspeed to normal after search completes.
+
+        Issued once before transitioning out of RETURN_INITIAL so RTL
+        is not left permanently capped at the slow search speed.
+
+        Args:
+            speed_m_s: Normal cruise groundspeed in m/s (should match WPNAV_SPEED param)
+        """
+        success = self.mav.send_command_long(
+            178,
+            param1=1.0,
+            param2=float(speed_m_s),
+            param3=-1.0,
+            param4=0.0,
+        )
+        if success:
+            logger.info(f"Normal speed restored to {speed_m_s:.2f} m/s via MAV_CMD_DO_CHANGE_SPEED.")
+        else:
+            logger.warning(f"Failed to restore normal speed to {speed_m_s:.2f} m/s.")
+        return success
+
     def get_local_position(self) -> Optional[tuple]:
         """
         Get the current local NED position as (x, y, z).
