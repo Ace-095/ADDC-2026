@@ -31,4 +31,5 @@ search:
   lane_overlap_pct: 0.20             # [UNUSED — lawnmower removed] kept for reference if reverting
   position_tolerance_m: 0.3          # arrival tolerance for position setpoints
   search_timeout_s: 90.0             # hard cap for bounded search phase
-  post_release_climb_altitude_m: 3.0 # ascend target post payload release
+  post_release_climb_altitude_m: 3.0  # ascend target post payload release (m)
+  post_release_return_speed_m_s: 1.0  # groundspeed for RETURN_TO_ORIGIN leg (m/s)

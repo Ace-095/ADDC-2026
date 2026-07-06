@@ -22,6 +22,7 @@ class State(Enum):
     ALIGNMENT = auto()
     QR_DECODE = auto()
     LAND = auto()
+    RETURN_TO_ORIGIN = auto()
     RTL = auto()
 
 
@@ -47,6 +48,7 @@ class StateMachine:
         self.takeoff_initiated = False
         self.takeoff_request_counter = 0
         self.hold_counter = 0
+        self.return_land_commanded = False
 
         # Position reference captured in GUIDED_HOLD after telemetry is confirmed available.
         # Never set to None silently — only transitions out of GUIDED_HOLD once this is non-None.
@@ -90,6 +92,8 @@ class StateMachine:
             self._tick_qr_decode(tick_count)
         elif self.state == State.LAND:
             self._tick_land(tick_count)
+        elif self.state == State.RETURN_TO_ORIGIN:
+            self._tick_return_to_origin(tick_count)
         elif self.state == State.RTL:
             self._tick_rtl(tick_count)
 
@@ -119,6 +123,8 @@ class StateMachine:
             self.land_confirmed = False
             self.takeoff_initiated = False
             self.takeoff_request_counter = 0
+        if new_state == State.RETURN_TO_ORIGIN:
+            self.return_land_commanded = False
         # Clear stale anchor on GUIDED_HOLD entry so a prior partial capture
         # from a crashed cycle cannot be reused in a retry scenario.
         if new_state == State.GUIDED_HOLD:
@@ -621,41 +627,99 @@ class StateMachine:
                 else:
                     logger.warning(f"Drop altitude met ({dist:.3f}m) but takeoff arming safety gate is active. Aborting.")
         
-        # Once payload release finished, command safe climb then RTL
+        # Once payload released: re-arm → takeoff to 3m → fly back to initial home anchor → land
         if self.payload.payload_released:
             climb_alt = self.cfg['search'].get('post_release_climb_altitude_m', 3.0)
             current_alt = self.fc.mav.get_altitude()
-            
-            # Step 1: Re-arm if disarmed (ArduCopter auto-disarms on land)
+
+            # Step 1: Re-arm if disarmed (ArduCopter auto-disarms on touchdown)
             if not self.fc.is_armed():
                 if tick_count % 20 == 0:
-                    logger.info("Drone is disarmed. Re-arming for post-release climb...")
+                    logger.info("Drone disarmed after landing. Re-arming for return climb...")
                     self.fc.arm()
-                return  # Wait for arming to be confirmed by heartbeat
-            
-            # Step 2: Command explicit takeoff to get airborne cleanly
+                return  # Wait for arm confirmation via heartbeat
+
+            # Step 2: Command takeoff to climb altitude
             if not self.takeoff_initiated:
                 if tick_count % 20 == 0:
-                    logger.info(f"Commanding takeoff to {climb_alt}m...")
+                    logger.info(f"Commanding takeoff to {climb_alt}m before return...")
                     self.fc.takeoff(climb_alt)
                     self.takeoff_request_counter += 1
-                
-                # If we've started ascending, we can mark takeoff initiated
-                # Give it a few seconds to react, then transition to GUIDED for the climb
+
+                # Once ascending is detected, switch to GUIDED for position control
                 if self.takeoff_request_counter > 2 and current_alt > 0.5:
                     self.takeoff_initiated = True
-                    logger.info("Takeoff confirmed. Switching to GUIDED for safe climb.")
+                    logger.info("Takeoff confirmed. Switching to GUIDED for return leg.")
                     self.fc.set_guided_mode()
                 return
 
-            # Step 3: Wait for climb altitude to be reached using GUIDED velocity commands
+            # Step 3: Hold GUIDED climb until target altitude reached
             if current_alt < climb_alt - 0.3:
                 # Command upward velocity (-Z in NED frame)
                 self.fc.send_velocity(0.0, 0.0, -0.5)
             else:
-                logger.info(f"Safe climb altitude ({climb_alt}m) reached. Requesting RTL...")
-                self.fc.rtl()
-                self._transition(State.RTL, tick_count)
+                logger.info(
+                    f"Climb altitude ({climb_alt}m) reached. "
+                    "Transitioning to RETURN_TO_ORIGIN to fly back to initial home anchor."
+                )
+                return_speed = self.cfg['search'].get('post_release_return_speed_m_s', 1.0)
+                self.fc.set_search_speed(return_speed)
+                self._transition(State.RETURN_TO_ORIGIN, tick_count)
+
+    def _tick_return_to_origin(self, tick_count: int):
+        """Fly back to the NED anchor captured at GUIDED_HOLD entry and land there.
+
+        Uses guided_anchor_ned (x, y, z in LOCAL_NED frame) as the return target —
+        this is GPS-home-agnostic, so any home location update caused by the QR
+        landing has zero effect on where we return to.
+        """
+        if not self.fc.mav.is_connected():
+            self._transition(State.BOOT, tick_count)
+            return
+
+        # Once land is commanded (arrival or timeout), just hold and wait
+        if self.return_land_commanded:
+            if tick_count % 40 == 0:
+                logger.info("RETURN_TO_ORIGIN: Final landing in progress...")
+            return
+
+        anchor = getattr(self, 'guided_anchor_ned', None)
+        if not anchor:
+            logger.error(
+                "RETURN_TO_ORIGIN: guided_anchor_ned is None — no home reference available. "
+                "Commanding emergency land at current position."
+            )
+            self.fc.land()
+            self.return_land_commanded = True
+            return
+
+        target_x, target_y, target_z = anchor
+        self.fc.goto_local_position(target_x, target_y, target_z)
+
+        # Check arrival tolerance (horizontal only — altitude locked by NED setpoint)
+        current_pos = self.fc.get_local_position()
+        if current_pos:
+            cx, cy, _ = current_pos
+            dist = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2)
+            tolerance = self.cfg['search'].get('position_tolerance_m', 0.5)
+            if dist <= tolerance:
+                logger.info(
+                    f"Arrived at initial home anchor (dist={dist:.2f}m ≤ {tolerance}m). "
+                    "Commanding final land."
+                )
+                self.fc.land()
+                self.return_land_commanded = True
+                return
+
+        # 30-second timeout fallback — land wherever we are
+        elapsed_ticks = tick_count - self.state_entry_tick
+        timeout_ticks = int(30.0 * self.cfg['system']['tick_hz'])
+        if elapsed_ticks >= timeout_ticks:
+            logger.warning(
+                "RETURN_TO_ORIGIN timeout (30s). Landing at current position as fallback."
+            )
+            self.fc.land()
+            self.return_land_commanded = True
 
     def _tick_rtl(self, tick_count: int):
         """Maintain Return-To-Launch state loop."""
