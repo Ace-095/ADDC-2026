@@ -151,6 +151,13 @@ class StateMachine:
             self._transition(State.BOOT, tick_count)
             return
 
+        # Capture initial home position (takeoff location) before any movement
+        if not hasattr(self, 'initial_home_ned'):
+            pos = self.fc.get_local_position()
+            if pos is not None:
+                self.initial_home_ned = pos
+                logger.info(f"Captured initial home position: {self.initial_home_ned}")
+
         # Mid-flight restart policy: if the Pixhawk is already in GUIDED when we
         # boot, it means the companion computer crashed while it was driving the
         # vehicle (QR alignment, payload drop, etc.). We cannot resume safely -
@@ -683,11 +690,11 @@ class StateMachine:
                 self._transition(State.RETURN_TO_ORIGIN, tick_count)
 
     def _tick_return_to_origin(self, tick_count: int):
-        """Fly back to the NED anchor captured at GUIDED_HOLD entry and land there.
+        """Fly back to the initial takeoff home anchor and land there.
 
-        Uses guided_anchor_ned (x, y, z in LOCAL_NED frame) as the return target —
-        this is GPS-home-agnostic, so any home location update caused by the QR
-        landing has zero effect on where we return to.
+        Uses initial_home_ned (captured before movement began) as the target.
+        This is GPS-home-agnostic, immune to any ArduCopter home location
+        updates triggered during the QR landing.
         """
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
@@ -699,10 +706,10 @@ class StateMachine:
                 logger.info("RETURN_TO_ORIGIN: Final landing in progress...")
             return
 
-        anchor = getattr(self, 'guided_anchor_ned', None)
+        anchor = getattr(self, 'initial_home_ned', None)
         if not anchor:
             logger.error(
-                "RETURN_TO_ORIGIN: guided_anchor_ned is None — no home reference available. "
+                "RETURN_TO_ORIGIN: initial_home_ned is None — no home reference available. "
                 "Commanding emergency land at current position."
             )
             self.fc.land()
