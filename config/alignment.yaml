@@ -12,3 +12,22 @@ alignment:
   max_velocity: 0.8             # Maximum guided-mode velocity command (m/s)
   center_deadzone_px: 30        # Pixel deadzone radius — errors within this are zeroed [Fix C1/V1]
   stable_frames_required: 20    # Consecutive in-deadzone frames before declaring 'aligned'
+
+  # Axis inversion — flip to true if the drone drifts AWAY from the target
+  # instead of converging. The correct value depends on camera mounting
+  # orientation (image-top = drone-forward is the assumed convention).
+  #
+  # Calibration procedure (repeat for each camera / mounting):
+  #   1. Run SITL/bench with QR in frame. Watch drone_pi.log debug output:
+  #        Aligning: px_err=(...) m_err=(...) cmd_vel=(vx, vy) invert=(x,y) ...
+  #   2. Nudge the QR so it appears AHEAD of center in-image (above center).
+  #        Expected: vx > 0  (drone moves forward toward the QR)
+  #        If vx < 0 instead: set  invert_y: true
+  #   3. Nudge the QR so it appears to the RIGHT of center.
+  #        Expected: vy > 0  (drone moves right toward the QR)
+  #        If vy < 0 instead: set  invert_x: true
+  #   4. Webcam on a desk ≠ PiCam3 mounted downward — re-calibrate after
+  #      any camera swap or reorientation.
+  #
+  invert_x: false               # Flip image-X → vy mapping (true if vy drives away from target)
+  invert_y: true                # Flip image-Y → vx mapping (true if vx drives away from target)

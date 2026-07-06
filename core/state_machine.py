@@ -27,15 +27,11 @@ class State(Enum):
 class StateMachine:
     """Synchronous FSM driving flight mode transitions and vision target centering."""
 
-    def __init__(self, config: dict, flight_control, camera_manager,
-                 qr_detector, alignment_controller, qr_decoder,
+    def __init__(self, config: dict, flight_control, vision_pipeline,
                  payload_control: PayloadControl, fallback_manager):
         self.cfg = config
         self.fc = flight_control
-        self.cam = camera_manager
-        self.qr_det = qr_detector
-        self.align = alignment_controller
-        self.qr_dec = qr_decoder
+        self.vision = vision_pipeline
         self.payload = payload_control
         self.fallback = fallback_manager
         
@@ -44,6 +40,9 @@ class StateMachine:
         self.vision_fail_counter = 0
         self.guided_request_counter = 0
         self.guided_request_retries = 0  # Number of complete 5s retry cycles exhausted
+        self.land_request_counter = 0
+        self.land_request_retries = 0
+        self.land_confirmed = False
         self.hold_counter = 0
 
         # Position reference captured in GUIDED_HOLD after telemetry is confirmed available.
@@ -98,12 +97,23 @@ class StateMachine:
         self.state_entry_tick = tick_count
         
         # Reset counters on state entry
-        self.guided_request_counter = 0
+        self.vision_fail_counter = 0
         self.hold_counter = 0
+
+        # Enable expensive decoding only when necessary
+        if self.state in (State.QR_DECODE, State.LAND):
+            self.vision.set_request_decode(True)
+        else:
+            self.vision.set_request_decode(False)
         self.vision_fail_counter = 0
         self.climb_initiated = False
         if new_state == State.REQUEST_GUIDED:
             self.guided_request_retries = 0
+            self.guided_request_counter = 0
+        if new_state == State.LAND:
+            self.land_request_retries = 0
+            self.land_request_counter = 0
+            self.land_confirmed = False
         # Clear stale anchor on GUIDED_HOLD entry so a prior partial capture
         # from a crashed cycle cannot be reused in a retry scenario.
         if new_state == State.GUIDED_HOLD:
@@ -278,15 +288,12 @@ class StateMachine:
             self._transition(State.SEARCH_SQUARE, tick_count)
             return
 
-        frame = self.cam.get_latest_frame()
-        if frame is None:
-            # Continue holding position, do not abort early if camera frame drops
+        vis = self.vision.get_latest_result()
+        if vis['timestamp'] == 0.0:
             return
 
-        # Look for target QR
-        found, bbox, center = self.qr_det.detect(frame)
-        if found:
-            logger.info(f"Target QR locked at pixel coordinates: {center}")
+        if vis['found']:
+            logger.info(f"Target QR locked at pixel coordinates: {vis['center']}")
             self._transition(State.ALIGNMENT, tick_count)
             return
 
@@ -358,20 +365,18 @@ class StateMachine:
             self._transition(State.BOOT, tick_count)
             return
 
-        frame = self.cam.get_latest_frame()
-        if frame is None:
+        vis = self.vision.get_latest_result()
+        if vis['timestamp'] == 0.0:
             self.fc.hold_position()
             self.vision_fail_counter += 1
             if self.vision_fail_counter >= self.vision_fail_limit:
-                logger.error("BOUNDED SEARCH ABORT: Camera frame unavailable for too long.")
-                self.fallback.handle_fail("SEARCH_SQUARE: Camera frame loss timeout")
+                logger.error("BOUNDED SEARCH ABORT: Vision result unavailable for too long.")
+                self.fallback.handle_fail("SEARCH_SQUARE: Vision timeout")
                 self._transition(State.RTL, tick_count)
             return
 
-        # Look for target QR
-        found, bbox, center = self.qr_det.detect(frame)
-        if found:
-            logger.info(f"Target QR locked at pixel coordinates: {center} during SEARCH_SQUARE")
+        if vis['found']:
+            logger.info(f"Target QR locked at pixel coordinates: {vis['center']} during SEARCH_SQUARE")
             self._transition(State.ALIGNMENT, tick_count)
             return
 
@@ -456,18 +461,17 @@ class StateMachine:
             self._transition(State.BOOT, tick_count)
             return
 
-        frame = self.cam.get_latest_frame()
-        if frame is None:
+        vis = self.vision.get_latest_result()
+        if vis['timestamp'] == 0.0:
             self.fc.hold_position()
             self.vision_fail_counter += 1
             if self.vision_fail_counter >= self.vision_fail_limit:
-                logger.error("ALIGNMENT ABORT: Camera frame unavailable for too long.")
-                self.fallback.handle_fail("ALIGNMENT: Camera frame loss timeout")
+                logger.error("ALIGNMENT ABORT: Vision result unavailable for too long.")
+                self.fallback.handle_fail("ALIGNMENT: Vision timeout")
                 self._transition(State.RTL, tick_count)
             return
 
-        found, bbox, center = self.qr_det.detect(frame)
-        if not found:
+        if not vis['found']:
             self.vision_fail_counter += 1
             if self.vision_fail_counter > 40:  # Lost for 2 seconds
                 logger.warning("Lost target track during alignment. Re-searching...")
@@ -485,19 +489,13 @@ class StateMachine:
             self._transition(State.RTL, tick_count)
             return
 
-        # Calculate pixel dimensions for scaling
-        x_coords = bbox[:, 0]
-        pixel_width = int(x_coords.max() - x_coords.min())
-        
-        # Pull telemetry alt
-        altitude_m = self.fc.mav.get_altitude()
-        
-        # Calculate corrective velocities
-        vx, vy, aligned = self.align.compute(center, pixel_width=pixel_width, altitude_m=altitude_m)
+        # Use pre-computed velocities from vision pipeline
+        vx, vy, aligned = vis['vx'], vis['vy'], vis['aligned']
         
         # Command horizontal adjustment with slow landing descent (vz = 0.1m/s)
         self.fc.send_velocity(vx, vy, vz=0.1)
 
+        # Transition logic
         if aligned:
             logger.info("Centering stability target reached. Initiating QR Decoding payload parse...")
             self._transition(State.QR_DECODE, tick_count)
@@ -510,15 +508,16 @@ class StateMachine:
 
         self.fc.hold_position()
         
-        frame = self.cam.get_latest_frame()
-        if frame is None:
+        vis = self.vision.get_latest_result()
+        if vis['timestamp'] == 0.0:
             return
 
-        # Attempt to decode payload on current frame, using tracked target box for crop
-        success, text, final = self.qr_dec.decode(frame, last_bbox=self.qr_det.last_bbox)
+        # Check if background thread successfully decoded it
+        success = vis['decode_success']
+        text = vis['decode_text']
         
         if success:
-            logger.info(f"Parsed QR Payload string: {text}")
+            logger.info(f"Target Payload Decoded: '{text}'")
             self.fc.send_qr_text(text)
             self._transition(State.LAND, tick_count)
         elif final:
@@ -532,38 +531,63 @@ class StateMachine:
             return
 
         ticks_in_state = tick_count - self.state_entry_tick
-        if ticks_in_state == 0:
-            logger.info("Commanding vehicle precision landing...")
-            self.fc.land()
+        
+        # 1. Retry-and-confirm logic for LAND command
+        if not self.land_confirmed:
+            # Throttle command to once per second (every 20 ticks at 20Hz)
+            if tick_count % 20 == 0:
+                logger.info(f"Commanding vehicle precision landing (attempt {self.land_request_retries + 1})...")
+                self.fc.land()
+            
+            self.land_request_counter += 1
+            
+            # Check mode confirmation using autopilot-specific HEARTBEAT
+            if self.fc.is_land_mode():
+                logger.info("LAND mode confirmed by autopilot heartbeat.")
+                self.land_confirmed = True
+                self.land_request_counter = 0
+            else:
+                # Retry timeout logic (max 3 cycles of 5 seconds = 15 seconds)
+                if self.land_request_counter > 100:
+                    self.land_request_retries += 1
+                    logger.warning(f"LAND mode request timeout (attempt {self.land_request_retries}/3).")
+                    self.land_request_counter = 0
+
+                    if self.land_request_retries >= 3:
+                        logger.error("LAND mode request failed after 3 retries (15s). Aborting to RTL.")
+                        self.fallback.handle_fail("LAND: max retries exceeded")
+                        self._transition(State.RTL, tick_count)
+                        return
+                
+                # If not confirmed, do not proceed with the rest of the tick (payload checks etc)
+                return
 
         # Closed-loop tracking via LANDING_TARGET messages
-        frame = self.cam.get_latest_frame()
-        if frame is not None:
-            found, bbox, center = self.qr_det.detect(frame)
-            if found:
-                # RTK vs Vision cross check
-                if self.fc.distance_to_wp() > 5.0:
-                    logger.error("RTK vs Vision drift mismatch during landing! Aborting.")
-                    self.fallback.handle_fail("RTK/Vision drift mismatch")
-                    self._transition(State.RTL, tick_count)
-                    return
-                
-                h, w = frame.shape[:2]
-                cx, cy = center
-                img_cx, img_cy = w / 2.0, h / 2.0
-                
-                err_x_px = cx - img_cx
-                err_y_px = cy - img_cy
-                
-                fov_rad = math.radians(self.cfg['camera'].get('fov_horizontal_deg', 66.0))
-                focal_length_px = (w / 2.0) / math.tan(fov_rad / 2.0)
-                
-                # Image +Y is down (backward in standard mounting), Image +X is right
-                angle_x = math.atan(err_y_px / focal_length_px)
-                angle_y = math.atan(err_x_px / focal_length_px)
-                
-                dist_m = self.fc.mav.get_altitude()
-                self.fc.send_landing_target(angle_x, angle_y, dist_m)
+        vis = self.vision.get_latest_result()
+        if vis['timestamp'] != 0.0 and vis['found']:
+            # RTK vs Vision cross check
+            if self.fc.distance_to_wp() > 5.0:
+                logger.error("RTK vs Vision drift mismatch during landing! Aborting.")
+                self.fallback.handle_fail("RTK/Vision drift mismatch")
+                self._transition(State.RTL, tick_count)
+                return
+            
+            frame_shape = vis['frame'].shape if vis['frame'] is not None else (1080, 1920)
+            h, w = frame_shape[:2]
+            cx, cy = vis['center']
+            img_cx, img_cy = w / 2.0, h / 2.0
+            err_x_px = cx - img_cx
+            err_y_px = cy - img_cy
+            
+            fov_rad = math.radians(self.cfg['camera'].get('fov_horizontal_deg', 66.0))
+            focal_length_px = (w / 2.0) / math.tan(fov_rad / 2.0)
+            
+            # Image +Y is down (backward in standard mounting), Image +X is right
+            angle_x = math.atan(err_y_px / focal_length_px)
+            angle_y = math.atan(err_x_px / focal_length_px)
+            
+            dist_m = self.fc.mav.get_altitude()
+            self.fc.send_landing_target(angle_x, angle_y, dist_m)
 
         # Hard landing timeout - if the release window is never reached (e.g. sensor failure,
         # horizontal drift), abort with RTL rather than hovering indefinitely.

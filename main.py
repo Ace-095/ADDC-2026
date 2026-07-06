@@ -57,6 +57,7 @@ from vision.camera_manager import CameraManager
 from vision.qr_detector import QRDetector
 from vision.alignment_controller import AlignmentController
 from vision.qr_decoder import QRDecoder
+from vision.vision_pipeline import VisionPipeline
 
 
 # Configure logging
@@ -139,15 +140,20 @@ class DroneSystem:
             max_attempts=self.config['qr_decode']['max_attempts']
         )
         
+        self.vision_pipeline = VisionPipeline(
+            camera=self.camera,
+            qr_detector=self.qr_detector,
+            qr_decoder=self.qr_decoder,
+            alignment_controller=self.alignment_controller,
+            flight_control=self.flight_control
+        )
+        
         self.state_machine = StateMachine(
-            self.config,
-            self.flight_control,
-            self.camera,
-            self.qr_detector,
-            self.alignment_controller,
-            self.qr_decoder,
-            self.payload_control,
-            self.fallback_manager
+            config=self.config,
+            flight_control=self.flight_control,
+            vision_pipeline=self.vision_pipeline,
+            payload_control=self.payload_control,
+            fallback_manager=self.fallback_manager
         )
         
         logger.info("Subsystems initialized successfully.")
@@ -157,6 +163,7 @@ class DroneSystem:
         logger.info("Starting drone companion system threads...")
         self.mav_interface.start()
         self.camera.start()
+        self.vision_pipeline.start()
         self.running = True
 
     def stop(self):
@@ -166,6 +173,7 @@ class DroneSystem:
         logger.info("Stopping drone companion systems...")
         self.running = False
         
+        self.vision_pipeline.stop()
         self.camera.stop()
         self.mav_interface.stop()
         logger.info("Drone companion systems shut down cleanly.")

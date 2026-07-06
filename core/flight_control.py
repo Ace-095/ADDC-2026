@@ -45,6 +45,19 @@ class FlightControl:
         # custom_mode = 4 represents GUIDED mode in ArduPilot
         return hb.custom_mode == 4
 
+    def is_land_mode(self) -> bool:
+        """Check if ArduPilot is currently in LAND mode.
+        
+        custom_mode = 9 represents LAND mode in ArduCopter.
+        """
+        hb_age = self.mav.get_autopilot_hb_age()
+        if hb_age > 5.0:
+            return False
+        hb = self.mav.get_autopilot_heartbeat()
+        if not hb:
+            return False
+        return hb.custom_mode == 9
+
     def distance_to_wp(self) -> float:
         """
         Get the current distance to the active waypoint in meters.
@@ -158,6 +171,8 @@ class FlightControl:
         )
         if success:
             logger.info("MAV_CMD_NAV_LAND commanded.")
+        else:
+            logger.error("Failed to send MAV_CMD_NAV_LAND command.")
         return success
 
     def rtl(self) -> bool:
