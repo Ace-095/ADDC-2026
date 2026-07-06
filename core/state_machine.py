@@ -107,8 +107,11 @@ class StateMachine:
         self.vision_fail_counter = 0
         self.hold_counter = 0
 
-        # Enable expensive decoding only when necessary
-        if self.state in (State.QR_DECODE, State.LAND):
+        # Enable expensive pyzbar decoding only in QR_DECODE state.
+        # LAND only needs vis['found']/vis['center'] for LANDING_TARGET angles —
+        # both come from qr_det.detect() which always runs regardless of request_decode.
+        # Leaving decode on in LAND was running pyzbar at 50Hz for no reason.
+        if self.state == State.QR_DECODE:
             self.vision.set_request_decode(True)
         else:
             self.vision.set_request_decode(False)
