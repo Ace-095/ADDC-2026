@@ -11,7 +11,7 @@ echo "==> Removing any old venvs..."
 rm -rf drone_venv .venv venv
 
 echo "==> Creating drone_venv with python3..."
-python3 -m venv drone_venv
+python3 -m venv drone_venv --system-site-packages
 
 echo "==> Upgrading pip..."
 ./drone_venv/bin/pip install --upgrade pip
