@@ -1,0 +1,1 @@
+./test_venv/bin/python bench_test_alignment.py
