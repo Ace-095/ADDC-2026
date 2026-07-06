@@ -2,6 +2,7 @@
 # PiCamera3 sensor settings for 1080p high-resolution QR scanning.
 
 camera:
+  source: "gazebo"              # Camera source (gazebo or hardware)
   width: 1920                   # Frame width in pixels
   height: 1080                  # Frame height in pixels (1080p)
   fps: 20                       # Capture frame rate — matches FSM tick_hz

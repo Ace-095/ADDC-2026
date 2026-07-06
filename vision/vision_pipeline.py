@@ -36,7 +36,8 @@ class VisionPipeline:
             'vx': 0.0,
             'vy': 0.0,
             'decode_success': False,
-            'decode_text': None
+            'decode_text': None,
+            'decode_final': False
         }
 
         self.request_decode = False
@@ -68,6 +69,7 @@ class VisionPipeline:
                 # Clear stale decode results when turning it off
                 self._latest_result['decode_success'] = False
                 self._latest_result['decode_text'] = None
+                self._latest_result['decode_final'] = False
 
     def _vision_loop(self):
         """Continuously process the latest camera frame."""
@@ -86,6 +88,7 @@ class VisionPipeline:
             vx, vy = 0.0, 0.0
             decode_success = False
             decode_text = None
+            decode_final = False
 
             # 2. Alignment & Decode (only if found)
             if found:
@@ -101,10 +104,11 @@ class VisionPipeline:
                     should_decode = self.request_decode
                 
                 if should_decode:
-                    success, text, _ = self.qr_dec.decode(frame, last_bbox=bbox)
+                    success, text, final = self.qr_dec.decode(frame, last_bbox=bbox)
                     if success:
                         decode_success = True
                         decode_text = text
+                    decode_final = final
 
             # 3. Update Cache
             with self._lock:
@@ -112,6 +116,7 @@ class VisionPipeline:
                 if not decode_success and self.request_decode:
                     decode_success = self._latest_result['decode_success']
                     decode_text = self._latest_result['decode_text']
+                    decode_final = self._latest_result['decode_final']
 
                 self._latest_result.update({
                     'found': found,
@@ -123,7 +128,8 @@ class VisionPipeline:
                     'vx': vx,
                     'vy': vy,
                     'decode_success': decode_success,
-                    'decode_text': decode_text
+                    'decode_text': decode_text,
+                    'decode_final': decode_final
                 })
             
             # Yield CPU to ensure other threads run (max ~50Hz processing)

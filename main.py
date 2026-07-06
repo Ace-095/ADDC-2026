@@ -9,6 +9,7 @@ import yaml
 import cv2
 import argparse
 import threading
+import numpy as np
 from pathlib import Path
 
 
@@ -118,6 +119,7 @@ class DroneSystem:
         self.payload_control = PayloadControl(self.config, self.flight_control)
         
         self.camera = CameraManager(
+            source=self.config['camera'].get('source', 'hardware'),
             width=self.config['camera']['width'],
             height=self.config['camera']['height'],
             fps=self.config['camera']['fps'],
@@ -245,26 +247,30 @@ class DroneSystem:
 
         while self.running:
             frame = self.camera.get_latest_frame()
-            if frame is not None:
-                h, w = frame.shape[:2]
-                
-                # Draw targeting crosshair
-                cv2.line(frame, (w // 2 - 30, h // 2), (w // 2 + 30, h // 2), (0, 0, 255), 2)
-                cv2.line(frame, (w // 2, h // 2 - 30), (w // 2, h // 2 + 30), (0, 0, 255), 2)
-                cv2.circle(frame, (w // 2, h // 2), 60, (0, 0, 255), 2)
-                
-                # Overlay telemetry status
-                status_text = f"State: {self.state_machine.state.name}"
-                cv2.putText(frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-                
-                alt_text = f"Alt: {self.mav_interface.get_altitude():.2f}m"
-                cv2.putText(frame, alt_text, (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                
-                mode_text = "SITL Simulator" if self.config['system']['use_sitl'] else "Pi 5 Hardware"
-                cv2.putText(frame, f"Mode: {mode_text}", (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+            if frame is None:
+                # Create placeholder frame if camera isn't ready or streaming yet
+                frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+                cv2.putText(frame, "WAITING FOR CAMERA STREAM...", (350, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 2)
+            
+            h, w = frame.shape[:2]
+            
+            # Draw targeting crosshair
+            cv2.line(frame, (w // 2 - 30, h // 2), (w // 2 + 30, h // 2), (0, 0, 255), 2)
+            cv2.line(frame, (w // 2, h // 2 - 30), (w // 2, h // 2 + 30), (0, 0, 255), 2)
+            cv2.circle(frame, (w // 2, h // 2), 60, (0, 0, 255), 2)
+            
+            # Overlay telemetry status
+            status_text = f"State: {self.state_machine.state.name}"
+            cv2.putText(frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            
+            alt_text = f"Alt: {self.mav_interface.get_altitude():.2f}m"
+            cv2.putText(frame, alt_text, (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            
+            mode_text = "SITL Simulator" if self.config['system']['use_sitl'] else "Pi 5 Hardware"
+            cv2.putText(frame, f"Mode: {mode_text}", (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
-                # Show frame
-                cv2.imshow(win_name, frame)
+            # Show frame
+            cv2.imshow(win_name, frame)
                 
             # waitKey runs events handling on main thread
             key = cv2.waitKey(30) & 0xFF

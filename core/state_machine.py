@@ -2,6 +2,7 @@
 
 import logging
 import math
+import time
 from enum import Enum, auto
 from core.payload_control import PayloadControl
 from typing import Optional
@@ -43,6 +44,8 @@ class StateMachine:
         self.land_request_counter = 0
         self.land_request_retries = 0
         self.land_confirmed = False
+        self.takeoff_initiated = False
+        self.takeoff_request_counter = 0
         self.hold_counter = 0
 
         # Position reference captured in GUIDED_HOLD after telemetry is confirmed available.
@@ -114,6 +117,8 @@ class StateMachine:
             self.land_request_retries = 0
             self.land_request_counter = 0
             self.land_confirmed = False
+            self.takeoff_initiated = False
+            self.takeoff_request_counter = 0
         # Clear stale anchor on GUIDED_HOLD entry so a prior partial capture
         # from a crashed cycle cannot be reused in a retry scenario.
         if new_state == State.GUIDED_HOLD:
@@ -121,9 +126,9 @@ class StateMachine:
         
         # Trigger controller resets if entering tracking modes
         if new_state == State.ALIGNMENT:
-            self.align.reset()
+            self.vision.align.reset()
         elif new_state == State.QR_DECODE:
-            self.qr_dec.reset()
+            self.vision.qr_dec.reset()
 
     def _tick_boot(self, tick_count: int):
         """Wait for Pixhawk MAVLink connection to establish."""
@@ -293,7 +298,8 @@ class StateMachine:
             return
 
         if vis['found']:
-            logger.info(f"Target QR locked at pixel coordinates: {vis['center']}")
+            latency_ms = (time.time() - vis['timestamp']) * 1000
+            logger.info(f"Target QR locked at pixel coordinates: {vis['center']} (Latency: {latency_ms:.1f}ms)")
             self._transition(State.ALIGNMENT, tick_count)
             return
 
@@ -376,7 +382,8 @@ class StateMachine:
             return
 
         if vis['found']:
-            logger.info(f"Target QR locked at pixel coordinates: {vis['center']} during SEARCH_SQUARE")
+            latency_ms = (time.time() - vis['timestamp']) * 1000
+            logger.info(f"Target QR locked at pixel coordinates: {vis['center']} during SEARCH_SQUARE (Latency: {latency_ms:.1f}ms)")
             self._transition(State.ALIGNMENT, tick_count)
             return
 
@@ -515,6 +522,7 @@ class StateMachine:
         # Check if background thread successfully decoded it
         success = vis['decode_success']
         text = vis['decode_text']
+        final = vis['decode_final']
         
         if success:
             logger.info(f"Target Payload Decoded: '{text}'")
@@ -561,6 +569,11 @@ class StateMachine:
                 
                 # If not confirmed, do not proceed with the rest of the tick (payload checks etc)
                 return
+
+        # Log altitude every second (20 ticks) to track descent progress
+        if tick_count % 20 == 0:
+            current_alt = self.fc.mav.get_altitude()
+            logger.info(f"LAND mode descent: Current relative altitude = {current_alt:.2f}m")
 
         # Closed-loop tracking via LANDING_TARGET messages
         vis = self.vision.get_latest_result()
@@ -610,14 +623,32 @@ class StateMachine:
         
         # Once payload release finished, command safe climb then RTL
         if self.payload.payload_released:
-            if not getattr(self, 'climb_initiated', False):
-                logger.info("Payload drop complete. Switching to GUIDED for safe climb.")
-                self.fc.set_guided_mode()
-                self.climb_initiated = True
-                
             climb_alt = self.cfg['search'].get('post_release_climb_altitude_m', 3.0)
             current_alt = self.fc.mav.get_altitude()
             
+            # Step 1: Re-arm if disarmed (ArduCopter auto-disarms on land)
+            if not self.fc.is_armed():
+                if tick_count % 20 == 0:
+                    logger.info("Drone is disarmed. Re-arming for post-release climb...")
+                    self.fc.arm()
+                return  # Wait for arming to be confirmed by heartbeat
+            
+            # Step 2: Command explicit takeoff to get airborne cleanly
+            if not self.takeoff_initiated:
+                if tick_count % 20 == 0:
+                    logger.info(f"Commanding takeoff to {climb_alt}m...")
+                    self.fc.takeoff(climb_alt)
+                    self.takeoff_request_counter += 1
+                
+                # If we've started ascending, we can mark takeoff initiated
+                # Give it a few seconds to react, then transition to GUIDED for the climb
+                if self.takeoff_request_counter > 2 and current_alt > 0.5:
+                    self.takeoff_initiated = True
+                    logger.info("Takeoff confirmed. Switching to GUIDED for safe climb.")
+                    self.fc.set_guided_mode()
+                return
+
+            # Step 3: Wait for climb altitude to be reached using GUIDED velocity commands
             if current_alt < climb_alt - 0.3:
                 # Command upward velocity (-Z in NED frame)
                 self.fc.send_velocity(0.0, 0.0, -0.5)

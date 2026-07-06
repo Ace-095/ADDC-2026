@@ -5,7 +5,7 @@
 mavlink:
   baud: 57600                        # Serial baud rate (IRL Pixhawk connection)
   port_real: "/dev/serial0"          # Serial port for Pixhawk 6C on Pi 5
-  port_sitl: "tcp:192.168.122.251:5762"   # SITL MAVProxy TCP endpoint (direct libvirt VM bridge)
+  port_sitl: "tcp:127.0.0.1:5764"   # SITL MAVProxy TCP endpoint (direct libvirt VM bridge)
   # ── Phase B transport experiment ──────────────────────────────────────────
   # To test whether the VM bridge / TCP path causes the 71s latency, start
   # MAVProxy with an extra UDP output and point the companion at it instead:

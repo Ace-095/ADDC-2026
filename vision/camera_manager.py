@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 class CameraManager:
     """Manage native Pi Camera or OpenCV fallbacks for frame capture."""
 
-    def __init__(self, width: int = 1920, height: int = 1080, fps: int = 20, buffer_size: int = 2, iso: int = 100, shutter_speed_us: int = 600, auto_exposure_adapt: bool = True):
+    def __init__(self, source: str = "hardware", width: int = 1920, height: int = 1080, fps: int = 20, buffer_size: int = 2, iso: int = 100, shutter_speed_us: int = 600, auto_exposure_adapt: bool = True):
+        self.source = source
         self.width = width
         self.height = height
         self.fps = fps
@@ -37,12 +38,24 @@ class CameraManager:
         """Initialize camera backend and start the capture thread."""
         logger.info("Initializing camera systems...")
         
-        # 1. Attempt Picamera2 initialization
+        # 1. Attempt Gazebo GStreamer if source is gazebo
+        if self.source == "gazebo":
+            if self._init_gazebo_gstreamer():
+                self._running = True
+                self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+                self._thread.start()
+                logger.info(f"Camera manager capture thread started using backend: {self.camera_type}")
+                return True
+            else:
+                logger.error("Gazebo GStreamer initialization failed!")
+                return False
+
+        # 2. Attempt Picamera2 initialization
         if self._init_picamera2():
             self.use_picamera = True
         else:
             logger.warning("Picamera2 not available or failed. Falling back to OpenCV capture...")
-            # 2. Attempt OpenCV fallbacks
+            # 3. Attempt OpenCV fallbacks
             if not self._init_opencv():
                 logger.error("All camera initialization attempts failed!")
                 return False
@@ -179,6 +192,29 @@ class CameraManager:
                 except:
                     pass
                 self.camera = None
+            return False
+
+    def _init_gazebo_gstreamer(self) -> bool:
+        """Initialize GStreamer pipeline to receive Gazebo video stream."""
+        try:
+            # Standard Gazebo SITL gstreamer UDP pipeline
+            pipeline = (
+                "udpsrc port=5600 timeout=3000000000 ! application/x-rtp, payload=96 ! "
+                "rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! video/x-raw, format=BGR ! appsink sync=false async=false drop=true"
+            )
+            logger.debug(f"Attempting Gazebo GStreamer capture with pipeline: {pipeline}")
+            cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+            
+            if cap.isOpened():
+                # Avoid reading a test frame here as it might block the main thread 
+                # indefinitely if Gazebo is not streaming video yet.
+                self.cap = cap
+                self.camera_type = "Gazebo GStreamer"
+                logger.info("Camera initialized: Gazebo GStreamer")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Gazebo GStreamer init failed: {e}")
             return False
 
     def _init_opencv(self) -> bool:

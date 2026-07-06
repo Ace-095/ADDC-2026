@@ -58,6 +58,16 @@ class FlightControl:
             return False
         return hb.custom_mode == 9
 
+    def is_armed(self) -> bool:
+        """Check if ArduPilot motors are currently armed."""
+        hb_age = self.mav.get_autopilot_hb_age()
+        if hb_age > 5.0:
+            return False
+        hb = self.mav.get_autopilot_heartbeat()
+        if not hb:
+            return False
+        return (hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+
     def distance_to_wp(self) -> float:
         """
         Get the current distance to the active waypoint in meters.
@@ -173,6 +183,30 @@ class FlightControl:
             logger.info("MAV_CMD_NAV_LAND commanded.")
         else:
             logger.error("Failed to send MAV_CMD_NAV_LAND command.")
+        return success
+
+    def arm(self) -> bool:
+        """Arm the vehicle motors."""
+        success = self.mav.send_command_long(
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            param1=1.0  # 1 to arm, 0 to disarm
+        )
+        if success:
+            logger.info("MAV_CMD_COMPONENT_ARM_DISARM commanded (arm).")
+        else:
+            logger.error("Failed to send MAV_CMD_COMPONENT_ARM_DISARM command.")
+        return success
+
+    def takeoff(self, altitude_m: float) -> bool:
+        """Command the vehicle to takeoff to a specific altitude."""
+        success = self.mav.send_command_long(
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            param7=altitude_m
+        )
+        if success:
+            logger.info(f"MAV_CMD_NAV_TAKEOFF to {altitude_m}m commanded.")
+        else:
+            logger.error("Failed to send MAV_CMD_NAV_TAKEOFF command.")
         return success
 
     def rtl(self) -> bool:

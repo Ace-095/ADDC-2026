@@ -1,6 +1,5 @@
 pymavlink
 pyserial
 numpy
-opencv-python
 pyzbar
 PyYAML
