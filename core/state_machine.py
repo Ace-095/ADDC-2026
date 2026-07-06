@@ -637,30 +637,36 @@ class StateMachine:
                 else:
                     logger.warning(f"Drop altitude met ({dist:.3f}m) but takeoff arming safety gate is active. Aborting.")
         
-        # Once payload released: re-arm → takeoff to 3m → fly back to initial home anchor → land
+        # Once payload released: switch to GUIDED → re-arm → takeoff to 3m → fly back to initial home anchor → land
         if self.payload.payload_released:
             climb_alt = self.cfg['search'].get('post_release_climb_altitude_m', 3.0)
             current_alt = self.fc.mav.get_altitude()
 
-            # Step 1: Re-arm if disarmed (ArduCopter auto-disarms on touchdown)
+            # Step 1: Switch to GUIDED mode first
+            if not self.fc.is_guided_mode():
+                if tick_count % 20 == 0:
+                    logger.info("Switching to GUIDED mode for post-release return sequence...")
+                    self.fc.set_guided_mode()
+                return  # Wait for mode confirmation
+
+            # Step 2: Re-arm if disarmed (ArduCopter auto-disarms on touchdown)
             if not self.fc.is_armed():
                 if tick_count % 20 == 0:
                     logger.info("Drone disarmed after landing. Re-arming for return climb...")
                     self.fc.arm()
                 return  # Wait for arm confirmation via heartbeat
 
-            # Step 2: Command takeoff to climb altitude
+            # Step 3: Command takeoff to climb altitude
             if not self.takeoff_initiated:
                 if tick_count % 20 == 0:
                     logger.info(f"Commanding takeoff to {climb_alt}m before return...")
                     self.fc.takeoff(climb_alt)
                     self.takeoff_request_counter += 1
 
-                # Once ascending is detected, switch to GUIDED for position control
+                # Once ascending is detected, we're good
                 if self.takeoff_request_counter > 2 and current_alt > 0.5:
                     self.takeoff_initiated = True
-                    logger.info("Takeoff confirmed. Switching to GUIDED for return leg.")
-                    self.fc.set_guided_mode()
+                    logger.info("Takeoff confirmed.")
                 return
 
             # Step 3: Hold GUIDED climb until target altitude reached
