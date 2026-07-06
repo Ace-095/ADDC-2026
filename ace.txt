@@ -1,1 +1,8 @@
 ./test_venv/bin/python bench_test_alignment.py
+
+
+Please open Mission Planner for your SITL vehicle and set:
+
+PLND_ENABLED = 1
+PLND_TYPE = 1 (or whichever PLND_EST_TYPE matches your ArduCopter version for MAVLink companion computer targeting)
+Once you set these and reboot the SITL vehicle, it will actually listen to the LANDING_TARGET messages and perform a precision descent instead of a blind one!

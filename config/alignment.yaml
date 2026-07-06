@@ -29,5 +29,5 @@ alignment:
   #   4. Webcam on a desk ≠ PiCam3 mounted downward — re-calibrate after
   #      any camera swap or reorientation.
   #
-  invert_x: false               # Flip image-X → vy mapping (true if vy drives away from target)
+  invert_x: true               # Flip image-X → vy mapping (true if vy drives away from target)
   invert_y: true                # Flip image-Y → vx mapping (true if vx drives away from target)

@@ -622,7 +622,14 @@ class StateMachine:
         # Altitude drop gate checks (only if payload not released yet)
         if not self.payload.payload_released:
             dist = self.payload.get_distance_reading()
-            if self.payload.is_in_release_window(dist) and self.fc.is_landed():
+            
+            in_window = self.payload.is_in_release_window(dist)
+            # SITL FIX: In SITL we don't have a real ultrasonic sensor, so dist (relative alt)
+            # drops to 0.0m upon landing, missing the [0.2, 0.4] release window entirely.
+            if self.payload.use_sitl and self.fc.is_landed():
+                in_window = True
+                
+            if in_window and self.fc.is_landed():
                 # Double safety arming check
                 if self.payload.takeoff_detected:
                     logger.warning(f"Safe release altitude window met: {dist:.3f}m. Releasing payload...")
