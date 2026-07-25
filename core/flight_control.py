@@ -218,6 +218,48 @@ class FlightControl:
             logger.info("MAV_CMD_NAV_RETURN_TO_LAUNCH commanded.")
         return success
 
+    def set_home_precise(self, lat_deg: float, lon_deg: float, alt_m: float) -> bool:
+        """Overwrite ArduCopter's home location with a specific GPS coordinate.
+
+        Uses MAV_CMD_DO_SET_HOME (179) via COMMAND_INT so lat/lon are carried as
+        int32 degE7 — precision ~0.01 mm vs ~1 m from COMMAND_LONG's 32-bit float.
+
+        param1 = 0  → use specified location (not current position)
+        x      = lat_deg × 1e7  (int32)
+        y      = lon_deg × 1e7  (int32)
+        z      = alt_m MSL      (float)
+
+        Must be called AFTER a confirmed re-arm (ArduCopter resets home on every
+        arm cycle). Confirm success by polling HOME_POSITION broadcast, not just
+        COMMAND_ACK.
+
+        Args:
+            lat_deg: Latitude  in decimal degrees.
+            lon_deg: Longitude in decimal degrees.
+            alt_m:  Altitude in metres MSL.
+        """
+        from pymavlink import mavutil
+        lat_e7 = int(lat_deg * 1e7)
+        lon_e7 = int(lon_deg * 1e7)
+        success = self.mav.send_command_int(
+            command=179,                           # MAV_CMD_DO_SET_HOME
+            frame=mavutil.mavlink.MAV_FRAME_GLOBAL,
+            param1=0.0,                            # 0 = use specified location
+            x=lat_e7,
+            y=lon_e7,
+            z=float(alt_m),
+        )
+        if success:
+            logger.info(
+                f"MAV_CMD_DO_SET_HOME (COMMAND_INT) sent: "
+                f"({lat_deg:.7f}\u00b0, {lon_deg:.7f}\u00b0, {alt_m:.1f}m MSL) "
+                f"lat_e7={lat_e7} lon_e7={lon_e7}"
+            )
+        else:
+            logger.error("Failed to send MAV_CMD_DO_SET_HOME via COMMAND_INT.")
+        return success
+
+
     def send_qr_text(self, text: str) -> bool:
         """Send the decoded QR text payload back to GCS STATUSTEXT logs."""
         logger.info(f"Visual Scan Result: {text}")

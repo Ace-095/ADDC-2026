@@ -1,0 +1,163 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="iris_runway">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-navsat-system"
+      name="gz::sim::systems::NavSat">
+    </plugin>
+
+    <scene>
+      <ambient>1.0 1.0 1.0 1.0</ambient>
+      <background>0.3 0.7 0.9 1.0</background>
+      <shadows>true</shadows>
+      <sky></sky>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Ground plane -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>500 500</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>500 500</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.3 0.3 0.3 1</ambient>
+            <diffuse>0.3 0.3 0.3 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 1m high table for drone to sit on -->
+    <!-- Pose is on the model: Z=0.5 so a 1m box sits with bottom at Z=0 and top at Z=1 -->
+    <model name="drone_table">
+      <static>true</static>
+      <pose>0 0 0.5 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>1.5 1.5 1.0</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.8 0.1 0.1 1</ambient>
+            <diffuse>0.8 0.1 0.1 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>1.5 1.5 1.0</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Test box to verify rendering -->
+    <model name="test_box">
+      <static>true</static>
+      <pose>-3 3 0.5 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>1 1 1</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.8 0.1 1</ambient>
+            <diffuse>0.1 0.8 0.1 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- QR Target: 1m wide x 1m tall, placed flat on ground 5m ahead -->
+    <model name="qr_target">
+      <static>true</static>
+      <pose>5 0 0.0005 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>1 1 0.001</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+            <pbr>
+              <metal>
+                <albedo_map>/home/ace/DUMP/AEROCLUB/ADDC 2026/CODEBASE/RESOURCES/drone_pi/qr_test.png</albedo_map>
+                <roughness>0.5</roughness>
+                <metalness>0.0</metalness>
+              </metal>
+            </pbr>
+          </material>
+        </visual>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>1 1 0.001</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Iris drone with gimbal+camera: spawned on top of the 1m table -->
+    <include>
+      <uri>model://iris_with_gimbal</uri>
+      <name>iris_with_gimbal</name>
+      <pose>0 0 1.05 0 0 0</pose>
+    </include>
+
+  </world>
+</sdf>

@@ -14,16 +14,22 @@ class VisionPipeline:
     the high-frequency FSM loop.
     """
 
-    def __init__(self, camera, qr_detector, qr_decoder, alignment_controller, flight_control):
+    def __init__(self, camera, qr_detector, qr_decoder, alignment_controller,
+                 flight_control, platform_detector=None):
         self.cam = camera
         self.qr_det = qr_detector
         self.qr_dec = qr_decoder
         self.align = alignment_controller
         self.fc = flight_control
+        self.platform_det = platform_detector
 
         self._running = False
         self._thread = None
         self._lock = threading.Lock()
+
+        # Detection mode: 'qr' for delivery target, 'platform' for ArUco return landing.
+        # Switched by the FSM via set_detection_mode().
+        self.detection_mode = 'qr'
 
         # Thread-safe cache of the latest CV results
         self._latest_result = {
@@ -71,6 +77,21 @@ class VisionPipeline:
                 self._latest_result['decode_text'] = None
                 self._latest_result['decode_final'] = False
 
+    def set_detection_mode(self, mode: str):
+        """Switch between 'qr' (delivery) and 'platform' (return landing) detection.
+
+        Called by the FSM when transitioning into/out of platform landing states.
+        When in 'platform' mode, the ArUco PlatformDetector runs instead of the
+        pyzbar QRDetector. Alignment math is unchanged — both detectors return
+        the same (found, bbox, center) interface.
+        """
+        if mode not in ('qr', 'platform'):
+            logger.error(f"Invalid detection mode '{mode}'. Keeping current mode.")
+            return
+        with self._lock:
+            self.detection_mode = mode
+        logger.info(f"Vision detection mode set to: {mode}")
+
     def _vision_loop(self):
         """Continuously process the latest camera frame."""
         while self._running:
@@ -81,8 +102,13 @@ class VisionPipeline:
                 time.sleep(0.01)
                 continue
             
-            # 1. Detection
-            found, bbox, center = self.qr_det.detect(frame)
+            # 1. Detection — use active detector based on mode
+            with self._lock:
+                mode = self.detection_mode
+            if mode == 'platform' and self.platform_det is not None:
+                found, bbox, center = self.platform_det.detect(frame)
+            else:
+                found, bbox, center = self.qr_det.detect(frame)
             
             aligned = False
             vx, vy = 0.0, 0.0
@@ -97,7 +123,17 @@ class VisionPipeline:
                 x_coords = bbox[:, 0]
                 pixel_width = int(x_coords.max() - x_coords.min())
                 altitude_m = self.fc.mav.get_altitude()
-                vx, vy, aligned = self.align.compute(center, pixel_width=pixel_width, altitude_m=altitude_m, frame_size=(w, h))
+                
+                with self._lock:
+                    current_mode = self.detection_mode
+                    
+                vx, vy, aligned = self.align.compute(
+                    center, 
+                    pixel_width=pixel_width, 
+                    altitude_m=altitude_m, 
+                    frame_size=(w, h),
+                    mode=current_mode
+                )
                 
                 # Decoding (only if requested)
                 with self._lock:

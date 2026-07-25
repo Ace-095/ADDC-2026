@@ -1,0 +1,13 @@
+# Platform precision landing configuration
+platform:
+  marker_id: 0                    # ArUco marker ID on the launch platform
+  marker_size_cm: 30.0            # Physical marker edge length (cm)
+  aruco_dict: "DICT_4X4_50"       # OpenCV ArUco dictionary
+  min_marker_width_px: 40         # Minimum detection pixel width
+  rtl_handoff_distance_m: 5.0     # Horizontal distance from home to trigger GUIDED handoff
+  rtl_handoff_altitude_m: 8.0     # Altitude below which handoff is allowed
+  rtl_handoff_timeout_s: 60.0     # Seconds before giving up on precision handoff
+
+  # Tighter alignment tuning for platform landing to avoid overshooting the raised stand
+  center_deadzone_px: 20          # Stricter pixel deadzone (QR is 30)
+  stable_frames_required: 30      # Requires more consecutive stable frames (QR is 20)

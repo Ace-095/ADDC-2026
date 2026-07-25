@@ -22,6 +22,8 @@ class State(Enum):
     ALIGNMENT = auto()
     QR_DECODE = auto()
     LAND = auto()
+    REASSERT_HOME = auto()
+    CLIMB = auto()
     RETURN_TO_ORIGIN = auto()
     RTL = auto()
 
@@ -53,11 +55,32 @@ class StateMachine:
         # Position reference captured in GUIDED_HOLD after telemetry is confirmed available.
         # Never set to None silently — only transitions out of GUIDED_HOLD once this is non-None.
         self.guided_anchor_ned = None
+
+        # True home position — captured ONCE on first arm detection in MONITOR_AUTO,
+        # before any waypoint navigation or re-arm can corrupt the EKF origin.
+        # Contains both GPS (lat_deg, lon_deg, alt_msl_m) and NED (x, y, z) for redundancy.
+        # Never overwritten after initial capture.
+        self.true_home = None  # type: Optional[dict]
+
+        # Edge-trigger guard: True when the autopilot was armed on the previous tick.
+        # Used to detect the disarmed→armed edge so true_home is captured exactly once
+        # (on first arm) without firing again on re-arms after landing.
+        self._was_armed: bool = False
         
         self.vision_fail_limit = config['vision']['fail_limit']
         self.decode_hold_ticks = config['qr_decode']['hold_ticks']
         self.search_pattern_enabled = config['vision'].get('search_pattern_enabled', True)
         
+        # Landing context: 'mission' for delivery (QR target), 'platform' for return precision landing.
+        # Controls ALIGNMENT transition (skip QR_DECODE for platform) and LAND behaviour
+        # (no payload release / re-climb for platform).
+        self.landing_context = 'mission'
+
+        self.home_restored = False
+        # Number of DO_SET_HOME sends issued in the current REASSERT_HOME entry.
+        # Reset to 0 every time REASSERT_HOME is entered via _transition().
+        self.reassert_attempts: int = 0
+
         self._last_state_log_tick = -999
 
     def tick(self, tick_count: int):
@@ -92,6 +115,10 @@ class StateMachine:
             self._tick_qr_decode(tick_count)
         elif self.state == State.LAND:
             self._tick_land(tick_count)
+        elif self.state == State.REASSERT_HOME:
+            self._tick_reassert_home(tick_count)
+        elif self.state == State.CLIMB:
+            self._tick_climb(tick_count)
         elif self.state == State.RETURN_TO_ORIGIN:
             self._tick_return_to_origin(tick_count)
         elif self.state == State.RTL:
@@ -125,6 +152,12 @@ class StateMachine:
             self.land_request_counter = 0
             self.land_confirmed = False
             self.takeoff_initiated = False
+            self.home_restored = False
+        if new_state == State.REASSERT_HOME:
+            self.reassert_attempts = 0
+            self.home_restored = False
+        if new_state == State.CLIMB:
+            self.takeoff_initiated = False
             self.takeoff_request_counter = 0
         if new_state == State.RETURN_TO_ORIGIN:
             self.return_land_commanded = False
@@ -135,6 +168,8 @@ class StateMachine:
         
         # Trigger controller resets if entering tracking modes
         if new_state == State.ALIGNMENT:
+            if self.landing_context == 'platform':
+                self.vision.set_detection_mode('platform')
             self.vision.align.reset()
         elif new_state == State.QR_DECODE:
             self.vision.qr_dec.reset()
@@ -151,12 +186,44 @@ class StateMachine:
             self._transition(State.BOOT, tick_count)
             return
 
-        # Capture initial home position (takeoff location) before any movement
-        if not hasattr(self, 'initial_home_ned'):
-            pos = self.fc.get_local_position()
-            if pos is not None:
-                self.initial_home_ned = pos
-                logger.info(f"Captured initial home position: {self.initial_home_ned}")
+        # Capture true home position ONCE on the first-ever disarmed→armed edge.
+        # Edge-trigger (not level-trigger) so a re-arm after QR landing cannot
+        # overwrite the reference.  The `is None` guard is the primary invariant;
+        # _was_armed prevents the expensive GPS/NED reads from running every tick.
+        currently_armed = self.fc.is_armed()
+        if self.true_home is None and currently_armed and not self._was_armed:
+            gps_fix = self.fc.mav.get_gps_fix_type()
+            min_fix = self.cfg.get('flight', {}).get('home_capture_min_gps_fix', 3)
+
+            if gps_fix >= min_fix:
+                gps_pos = self.fc.mav.get_global_position()
+                ned_pos = self.fc.get_local_position()
+
+                if gps_pos is not None and ned_pos is not None:
+                    self.true_home = {
+                        'gps': gps_pos,   # (lat_deg, lon_deg, alt_msl_m)
+                        'ned': ned_pos,   # (x, y, z) in LOCAL_POSITION_NED frame
+                    }
+                    lat, lon, alt = gps_pos
+                    x, y, z = ned_pos
+                    logger.info(
+                        f"TRUE HOME CAPTURED — "
+                        f"GPS: ({lat:.7f}, {lon:.7f}, {alt:.1f}m MSL) | "
+                        f"NED: ({x:.2f}, {y:.2f}, {z:.2f}) | "
+                        f"GPS fix: {gps_fix}"
+                    )
+                    self.fc.mav.send_statustext(
+                        f"HOME: {lat:.5f},{lon:.5f} {alt:.0f}m"
+                    )
+            else:
+                # Warn at ~2s cadence so we can see why capture is pending in the log.
+                elapsed = tick_count - self.state_entry_tick
+                if elapsed % 40 == 0:
+                    logger.warning(
+                        f"true_home waiting — GPS fix={gps_fix} "
+                        f"(need ≥{min_fix}, 3=3D 5=RTK-float 6=RTK-fixed)"
+                    )
+        self._was_armed = currently_armed
 
         # Mid-flight restart policy: if the Pixhawk is already in GUIDED when we
         # boot, it means the companion computer crashed while it was driving the
@@ -505,8 +572,8 @@ class StateMachine:
 
         self.vision_fail_counter = 0
 
-        # RTK GPS Cross-Check for Vision Hallucinations
-        if self.fc.distance_to_wp() > 5.0:
+        # RTK GPS Cross-Check for Vision Hallucinations (mission delivery only)
+        if self.landing_context == 'mission' and self.fc.distance_to_wp() > 5.0:
             logger.error("RTK vs Vision drift mismatch! Target > 5m from GPS waypoint. Aborting.")
             self.fallback.handle_fail("RTK/Vision drift mismatch")
             self._transition(State.RTL, tick_count)
@@ -520,8 +587,12 @@ class StateMachine:
 
         # Transition logic
         if aligned:
-            logger.info("Centering stability target reached. Initiating QR Decoding payload parse...")
-            self._transition(State.QR_DECODE, tick_count)
+            if self.landing_context == 'mission':
+                logger.info("Centering stability target reached. Initiating QR Decoding payload parse...")
+                self._transition(State.QR_DECODE, tick_count)
+            else:
+                logger.info("Platform centering stable. Initiating precision landing.")
+                self._transition(State.LAND, tick_count)
 
     def _tick_qr_decode(self, tick_count: int):
         """Command hover and parse QR text contents."""
@@ -547,6 +618,25 @@ class StateMachine:
         elif final:
             logger.warning("Failed to decode target payload. Initiating landing sequence anyway.")
             self._transition(State.LAND, tick_count)
+
+    def _send_landing_target(self, vis: dict):
+        """Compute and send LANDING_TARGET angles from vision detection result."""
+        frame_shape = vis['frame'].shape if vis['frame'] is not None else (1080, 1920)
+        h, w = frame_shape[:2]
+        cx, cy = vis['center']
+        img_cx, img_cy = w / 2.0, h / 2.0
+        err_x_px = cx - img_cx
+        err_y_px = cy - img_cy
+        
+        fov_rad = math.radians(self.cfg['camera'].get('fov_horizontal_deg', 66.0))
+        focal_length_px = (w / 2.0) / math.tan(fov_rad / 2.0)
+        
+        # Image +Y is down (backward in standard mounting), Image +X is right
+        angle_x = math.atan(err_y_px / focal_length_px)
+        angle_y = math.atan(err_x_px / focal_length_px)
+        
+        dist_m = self.fc.mav.get_altitude()
+        self.fc.send_landing_target(angle_x, angle_y, dist_m)
 
     def _tick_land(self, tick_count: int):
         """Execute landing and trigger distance-sensor gated payload drops."""
@@ -594,36 +684,31 @@ class StateMachine:
         # Closed-loop tracking via LANDING_TARGET messages
         vis = self.vision.get_latest_result()
         if vis['timestamp'] != 0.0 and vis['found']:
-            # RTK vs Vision cross check
-            if self.fc.distance_to_wp() > 5.0:
+            # RTK vs Vision cross check (mission only)
+            if self.landing_context == 'mission' and self.fc.distance_to_wp() > 5.0:
                 logger.error("RTK vs Vision drift mismatch during landing! Aborting.")
                 self.fallback.handle_fail("RTK/Vision drift mismatch")
                 self._transition(State.RTL, tick_count)
                 return
             
-            frame_shape = vis['frame'].shape if vis['frame'] is not None else (1080, 1920)
-            h, w = frame_shape[:2]
-            cx, cy = vis['center']
-            img_cx, img_cy = w / 2.0, h / 2.0
-            err_x_px = cx - img_cx
-            err_y_px = cy - img_cy
-            
-            fov_rad = math.radians(self.cfg['camera'].get('fov_horizontal_deg', 66.0))
-            focal_length_px = (w / 2.0) / math.tan(fov_rad / 2.0)
-            
-            # Image +Y is down (backward in standard mounting), Image +X is right
-            angle_x = math.atan(err_y_px / focal_length_px)
-            angle_y = math.atan(err_x_px / focal_length_px)
-            
-            dist_m = self.fc.mav.get_altitude()
-            self.fc.send_landing_target(angle_x, angle_y, dist_m)
+            self._send_landing_target(vis)
 
-        # Hard landing timeout - if the release window is never reached (e.g. sensor failure,
-        # horizontal drift), abort with RTL rather than hovering indefinitely.
-        if ticks_in_state > 600:  # 30 seconds at 20 Hz
+        # Hard landing timeout - only guards pre-release: if the drop window is never
+        # reached (sensor failure, drift), abort. Once released, post-release climb is
+        # in progress — don't kill it with this timer.
+        if ticks_in_state > 600 and not self.payload.payload_released:  # 30s at 20 Hz
             logger.error("LAND TIMEOUT: Release window not reached in 30s. Triggering RTL.")
             self.fallback.handle_fail("LAND timeout: release window never hit")
             self._transition(State.RTL, tick_count)
+            return
+
+        # Platform landing: no payload release — just precision descent → disarm
+        if self.landing_context == 'platform':
+            if self.fc.is_landed():
+                logger.info("PLATFORM LANDING COMPLETE. Vehicle is on the ground.")
+                self.vision.set_detection_mode('qr')  # restore default
+                self.fc.mav.send_statustext("MISSION COMPLETE: Platform landing confirmed")
+                # Terminal state
             return
 
         # Altitude drop gate checks (only if payload not released yet)
@@ -644,11 +729,8 @@ class StateMachine:
                 else:
                     logger.warning(f"Drop altitude met ({dist:.3f}m) but takeoff arming safety gate is active. Aborting.")
         
-        # Once payload released: switch to GUIDED → re-arm → takeoff to 3m → fly back to initial home anchor → land
+        # Once payload released: switch to GUIDED → re-arm → REASSERT_HOME → CLIMB → RTL/return
         if self.payload.payload_released:
-            climb_alt = self.cfg['search'].get('post_release_climb_altitude_m', 3.0)
-            current_alt = self.fc.mav.get_altitude()
-
             # Step 1: Switch to GUIDED mode first
             if not self.fc.is_guided_mode():
                 if tick_count % 20 == 0:
@@ -656,45 +738,132 @@ class StateMachine:
                     self.fc.set_guided_mode()
                 return  # Wait for mode confirmation
 
-            # Step 2: Re-arm if disarmed (ArduCopter auto-disarms on touchdown)
+            # Step 2: Re-arm (ArduCopter auto-disarms on touchdown)
             if not self.fc.is_armed():
                 if tick_count % 20 == 0:
                     logger.info("Drone disarmed after landing. Re-arming for return climb...")
                     self.fc.arm()
                 return  # Wait for arm confirmation via heartbeat
 
-            # Step 3: Command takeoff to climb altitude
-            if not self.takeoff_initiated:
-                if tick_count % 20 == 0:
-                    logger.info(f"Commanding takeoff to {climb_alt}m before return...")
-                    self.fc.takeoff(climb_alt)
-                    self.takeoff_request_counter += 1
+            # Step 3: Re-arm confirmed — assert home BEFORE any takeoff.
+            # ArduCopter just reset home to the QR pad on re-arm; REASSERT_HOME
+            # will overwrite it with true_home and confirm via HOME_POSITION broadcast.
+            logger.info("Re-arm confirmed. Entering REASSERT_HOME to restore launch point.")
+            self._transition(State.REASSERT_HOME, tick_count)
 
-                # Once ascending is detected, we're good
-                if self.takeoff_request_counter > 2 and current_alt > 0.5:
-                    self.takeoff_initiated = True
-                    logger.info("Takeoff confirmed.")
+
+    def _tick_reassert_home(self, tick_count: int):
+        """Re-assert true home after re-arm, confirmed via HOME_POSITION broadcast.
+
+        ArduCopter resets home to the current (QR pad) location on every arm cycle.
+        This state corrects it back to the original launch point captured in
+        true_home before any takeoff.
+
+        Strategy (non-blocking, no direct socket access):
+          - Sends MAV_CMD_DO_SET_HOME via COMMAND_INT (int32 lat/lon) once per second.
+          - Polls HOME_POSITION from the message cache (streamed at 0.5 Hz via
+            _request_targeted_streams). Tolerance: ±5 degE7 ≈ 0.5 µdeg ≈ <0.1 m.
+          - After 3 failed sends without cache confirmation → FallbackManager + RTL.
+            An unconfirmed home means RTL would fly to the QR pad, which is worse
+            than not flying at all.
+        """
+        if not self.fc.mav.is_connected():
+            self._transition(State.BOOT, tick_count)
+            return
+
+        if self.true_home is None:
+            logger.error(
+                "REASSERT_HOME: true_home is None — cannot restore launch point. "
+                "Triggering fallback (RTL will target wrong location)."
+            )
+            self.fallback.handle_fail("REASSERT_HOME: true_home not captured")
+            self._transition(State.RTL, tick_count)
+            return
+
+        lat_deg, lon_deg, alt_m = self.true_home['gps']
+        lat_e7 = int(lat_deg * 1e7)
+        lon_e7 = int(lon_deg * 1e7)
+
+        # Send set_home_precise once per second (every 20 ticks at 20 Hz).
+        if tick_count % 20 == 0:
+            self.reassert_attempts += 1
+            logger.info(
+                f"REASSERT_HOME: sending DO_SET_HOME attempt {self.reassert_attempts}/3 "
+                f"({lat_deg:.7f}\u00b0, {lon_deg:.7f}\u00b0, {alt_m:.1f}m) ..."
+            )
+            self.fc.set_home_precise(lat_deg, lon_deg, alt_m)
+
+        # Poll HOME_POSITION from the message cache — never read directly from the socket.
+        # ArduPilot broadcasts HOME_POSITION after every successful home change.
+        hp = self.fc.mav.get_message('HOME_POSITION')
+        if hp is not None:
+            lat_match = abs(hp.latitude  - lat_e7) < 5   # ±5 degE7 ≈ <0.1 m
+            lon_match = abs(hp.longitude - lon_e7) < 5
+            if lat_match and lon_match:
+                self.home_restored = True
+                logger.info(
+                    f"REASSERT_HOME: HOME_POSITION confirmed \u2713 "
+                    f"hp.lat={hp.latitude} hp.lon={hp.longitude} "
+                    f"(target lat_e7={lat_e7} lon_e7={lon_e7})"
+                )
+                self.fc.mav.send_statustext(
+                    f"HOME OK: {lat_deg:.5f},{lon_deg:.5f} {alt_m:.0f}m"
+                )
+                self._transition(State.CLIMB, tick_count)
                 return
 
-            # Step 3: Hold GUIDED climb until target altitude reached
-            if current_alt < climb_alt - 0.3:
-                # Command upward velocity (-Z in NED frame)
-                self.fc.send_velocity(0.0, 0.0, -0.5)
-            else:
-                logger.info(
-                    f"Climb altitude ({climb_alt}m) reached. "
-                    "Transitioning to RETURN_TO_ORIGIN to fly back to initial home anchor."
-                )
-                return_speed = self.cfg['search'].get('post_release_return_speed_m_s', 1.0)
-                self.fc.set_search_speed(return_speed)
-                self._transition(State.RETURN_TO_ORIGIN, tick_count)
+        # After 3 sends (≈3 s) without a matching HOME_POSITION: abort.
+        # Proceeding with the wrong home is a safety hazard — RTL would land on the QR pad.
+        if self.reassert_attempts >= 3 and not self.home_restored:
+            logger.error(
+                "REASSERT_HOME: HOME_POSITION not confirmed after 3 attempts. "
+                "RTL would target wrong location — triggering fallback."
+            )
+            self.fallback.handle_fail("REASSERT_HOME: HOME_POSITION confirm failed after 3 attempts")
+            self._transition(State.RTL, tick_count)
+
+    def _tick_climb(self, tick_count: int):
+        """Command takeoff and climb to post-release altitude, then hand off to RETURN_TO_ORIGIN.
+
+        Extracted from old _tick_land() Steps 3 and 4.  Entered only after
+        REASSERT_HOME confirms home is correctly set to the true launch point.
+        """
+        if not self.fc.mav.is_connected():
+            self._transition(State.BOOT, tick_count)
+            return
+
+        climb_alt = self.cfg['search'].get('post_release_climb_altitude_m', 3.0)
+        current_alt = self.fc.mav.get_altitude()
+
+        # Step A: command takeoff, wait for confirmed ascent
+        if not self.takeoff_initiated:
+            if tick_count % 20 == 0:
+                logger.info(f"CLIMB: commanding takeoff to {climb_alt}m ...")
+                self.fc.takeoff(climb_alt)
+                self.takeoff_request_counter += 1
+
+            # Confirm ascent: at least 3 takeoff commands sent AND altitude is rising
+            if self.takeoff_request_counter > 2 and current_alt > 0.5:
+                self.takeoff_initiated = True
+                logger.info("CLIMB: takeoff confirmed, ascending.")
+            return
+
+        # Step B: push upward until target altitude reached, then hand off
+        if current_alt < climb_alt - 0.3:
+            self.fc.send_velocity(0.0, 0.0, -0.5)  # -Z = up in NED
+        else:
+            logger.info(
+                f"CLIMB: target altitude {climb_alt}m reached "
+                f"(current={current_alt:.2f}m). Transitioning to RETURN_TO_ORIGIN."
+            )
+            self._transition(State.RETURN_TO_ORIGIN, tick_count)
 
     def _tick_return_to_origin(self, tick_count: int):
         """Fly back to the initial takeoff home anchor and land there.
 
-        Uses initial_home_ned (captured before movement began) as the target.
+        Uses true_home['ned'] (captured on first arm in MONITOR_AUTO) as the target.
         This is GPS-home-agnostic, immune to any ArduCopter home location
-        updates triggered during the QR landing.
+        updates triggered during the QR landing or re-arm.
         """
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
@@ -706,17 +875,20 @@ class StateMachine:
                 logger.info("RETURN_TO_ORIGIN: Final landing in progress...")
             return
 
-        anchor = getattr(self, 'initial_home_ned', None)
-        if not anchor:
+        anchor = self.true_home['ned'] if self.true_home else None
+        if anchor is None:
             logger.error(
-                "RETURN_TO_ORIGIN: initial_home_ned is None — no home reference available. "
+                "RETURN_TO_ORIGIN: true_home is None — no home reference was captured. "
                 "Commanding emergency land at current position."
             )
             self.fc.land()
             self.return_land_commanded = True
             return
 
-        target_x, target_y, target_z = anchor
+        target_x, target_y, _ = anchor
+        # Fly back at the climb altitude rather than descending diagonally to ground (z=0)
+        climb_alt = self.cfg['search'].get('post_release_climb_altitude_m', 3.0)
+        target_z = -climb_alt  # NED z is negative
         self.fc.goto_local_position(target_x, target_y, target_z)
 
         # Check arrival tolerance (horizontal only — altitude locked by NED setpoint)
@@ -726,12 +898,21 @@ class StateMachine:
             dist = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2)
             tolerance = self.cfg['search'].get('position_tolerance_m', 0.5)
             if dist <= tolerance:
-                logger.info(
-                    f"Arrived at initial home anchor (dist={dist:.2f}m ≤ {tolerance}m). "
-                    "Commanding final land."
-                )
-                self.fc.land()
-                self.return_land_commanded = True
+                if self.landing_context == 'mission':
+                    logger.info(
+                        f"Arrived at initial home anchor (dist={dist:.2f}m ≤ {tolerance}m). "
+                        "Handing off to GUIDED for platform precision landing."
+                    )
+                    self.landing_context = 'platform'
+                    self.vision.set_detection_mode('platform')
+                    self._transition(State.REQUEST_GUIDED, tick_count)
+                else:
+                    logger.info(
+                        f"Arrived at initial home anchor (dist={dist:.2f}m ≤ {tolerance}m). "
+                        "Commanding final land."
+                    )
+                    self.fc.land()
+                    self.return_land_commanded = True
                 return
 
         # 30-second timeout fallback — land wherever we are
@@ -745,7 +926,7 @@ class StateMachine:
             self.return_land_commanded = True
 
     def _tick_rtl(self, tick_count: int):
-        """Maintain Return-To-Launch state loop."""
+        """Maintain Return-To-Launch state loop with optional proximity handoff."""
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
             return
@@ -754,5 +935,36 @@ class StateMachine:
         if ticks_in_state == 0:
             logger.info("Commanding vehicle Return To Launch...")
             self.fc.rtl()
-            
-        # Drone returns home under autopilot control
+
+        # If this RTL was triggered from the post-release flow (mission context),
+        # monitor for home proximity and hand off to precision landing.
+        if self.landing_context == 'mission' and self.true_home is not None:
+            current_pos = self.fc.get_local_position()
+            if current_pos:
+                home_ned = self.true_home['ned']
+                dx = current_pos[0] - home_ned[0]
+                dy = current_pos[1] - home_ned[1]
+                horiz_dist = math.sqrt(dx**2 + dy**2)
+                alt = self.fc.mav.get_altitude()
+                
+                handoff_dist = self.cfg.get('platform', {}).get('rtl_handoff_distance_m', 5.0)
+                handoff_alt = self.cfg.get('platform', {}).get('rtl_handoff_altitude_m', 8.0)
+                
+                if tick_count % 40 == 0:
+                    logger.info(f"RTL monitoring: dist={horiz_dist:.1f}m, alt={alt:.1f}m (target dist<{handoff_dist}, alt<{handoff_alt})")
+                
+                if horiz_dist < handoff_dist and alt < handoff_alt:
+                    logger.info(
+                        f"RTL near home (dist={horiz_dist:.1f}m, alt={alt:.1f}m). "
+                        "Handing off to GUIDED for platform precision landing."
+                    )
+                    # Switch context to platform and re-enter the alignment pipeline
+                    self.landing_context = 'platform'
+                    self.vision.set_detection_mode('platform')
+                    self._transition(State.REQUEST_GUIDED, tick_count)
+                    return
+
+            # Safety timeout — if proximity never triggers, RTL lands normally (GPS-level)
+            timeout_s = self.cfg.get('platform', {}).get('rtl_handoff_timeout_s', 60.0)
+            if ticks_in_state > int(timeout_s * self.cfg['system']['tick_hz']):
+                logger.warning("RTL handoff timeout. ArduCopter will complete blind RTL landing.")

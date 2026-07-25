@@ -59,7 +59,7 @@ class SystemMonitor:
 
         temp_c = temp_mc / 1000.0
 
-        if temp_mc >= _TEMP_CRITICAL_MC:
+        if temp_mc >= _TEMP_CRITICAL_MC and not self.config.get('system', {}).get('use_sitl', False):
             logger.critical(
                 "SystemMonitor: CPU temperature %.1f°C exceeds critical threshold (85°C)! "
                 "Triggering failsafe.", temp_c

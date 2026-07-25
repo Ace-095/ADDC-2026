@@ -14,9 +14,10 @@ class AlignmentController:
 
     def __init__(self, config: dict):
         cfg = config['alignment']
-        self.deadzone_px = cfg['center_deadzone_px']
+        # QR (mission) target tuning
+        self.qr_deadzone_px = cfg['center_deadzone_px']
         self.max_vel = cfg['max_velocity']
-        self.stable_required = cfg['stable_frames_required']
+        self.qr_stable_required = cfg['stable_frames_required']
 
         # PID constants
         self.kp = cfg.get('pid_kp', 0.5)
@@ -36,6 +37,12 @@ class AlignmentController:
         
         # QR sizing config
         self.qr_size_cm = config['vision']['qr_size_cm']
+
+        # Platform target tuning (tighter defaults)
+        p_cfg = config.get('platform', {})
+        self.platform_deadzone_px = p_cfg.get('center_deadzone_px', 20)
+        self.platform_stable_required = p_cfg.get('stable_frames_required', 30)
+        self.platform_size_cm = p_cfg.get('marker_size_cm', 30.0)
         
         # Optics
         self.fov_horizontal_rad = np.radians(config['camera'].get('fov_horizontal_deg', 66.0))
@@ -53,15 +60,16 @@ class AlignmentController:
         self.stable_counter = 0
         logger.info("Alignment PID controller state reset.")
 
-    def compute(self, center: Tuple[int, int], pixel_width: Optional[int] = None, altitude_m: float = 5.0, frame_size: Optional[Tuple[int, int]] = None) -> Tuple[float, float, bool]:
+    def compute(self, center: Tuple[int, int], pixel_width: Optional[int] = None, altitude_m: float = 5.0, frame_size: Optional[Tuple[int, int]] = None, mode: str = 'qr') -> Tuple[float, float, bool]:
         """
-        Compute horizontal velocity command (vx, vy) to center the drone over the QR code.
+        Compute horizontal velocity command (vx, vy) to center the drone over the target.
 
         Args:
-            center: (cx, cy) pixel coordinates of the detected QR code
-            pixel_width: Bounding width of the QR code in pixels (for dynamic distance estimation)
+            center: (cx, cy) pixel coordinates of the detected target
+            pixel_width: Bounding width of the target in pixels (for dynamic distance estimation)
             altitude_m: Telemetry height above ground in meters (fallback for scaling ratio)
             frame_size: Optional (width, height) tuple of the actual camera frame
+            mode: Detection mode ('qr' or 'platform') to select tuning parameters
 
         Returns:
             vx: Forward velocity command (NED local frame X, m/s)
@@ -70,6 +78,16 @@ class AlignmentController:
         """
         cx, cy = center
         current_time = time.time()
+
+        # Select context-specific tuning
+        if mode == 'platform':
+            deadzone = self.platform_deadzone_px
+            stable_req = self.platform_stable_required
+            marker_size_cm = self.platform_size_cm
+        else:
+            deadzone = self.qr_deadzone_px
+            stable_req = self.qr_stable_required
+            marker_size_cm = self.qr_size_cm
 
         # Dynamically support actual frame dimensions if passed
         width = frame_size[0] if frame_size is not None else self.image_width
@@ -84,16 +102,16 @@ class AlignmentController:
         err_y_px = cy - img_cy
 
         # Apply deadzone filtering directly to pixel coordinates
-        if abs(err_x_px) < self.deadzone_px:
+        if abs(err_x_px) < deadzone:
             err_x_px = 0.0
-        if abs(err_y_px) < self.deadzone_px:
+        if abs(err_y_px) < deadzone:
             err_y_px = 0.0
 
-        # Estimate distance from QR code for metric scale conversions
+        # Estimate distance from target for metric scale conversions
         if pixel_width is not None and pixel_width > 0:
             # Calculate focal length dynamically from FOV
             focal_length_px = (width / 2.0) / np.tan(self.fov_horizontal_rad / 2.0)
-            real_width_m = self.qr_size_cm / 100.0
+            real_width_m = marker_size_cm / 100.0
             distance_m = (real_width_m * focal_length_px) / pixel_width
         else:
             distance_m = altitude_m
@@ -128,16 +146,16 @@ class AlignmentController:
         else:
             self.stable_counter = 0
 
-        aligned = self.stable_counter >= self.stable_required
+        aligned = self.stable_counter >= stable_req
 
         # Safety log alignment parameters
         if int(current_time) % 5 == 0:
             logger.debug(
-                f"Aligning: px_err=({err_x_px:.0f},{err_y_px:.0f}) "
+                f"Aligning [{mode}]: px_err=({err_x_px:.0f},{err_y_px:.0f}) "
                 f"m_err=({error_x_m:.2f},{error_y_m:.2f}) "
                 f"cmd_vel=({vx:.2f},{vy:.2f}) "
                 f"invert=({self.invert_x},{self.invert_y}) "
-                f"stable={self.stable_counter}/{self.stable_required}"
+                f"stable={self.stable_counter}/{stable_req}"
             )
 
         return float(vx), float(vy), aligned

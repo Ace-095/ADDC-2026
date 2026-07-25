@@ -1,8 +1,57 @@
-./test_venv/bin/python bench_test_alignment.py
+===================================================
+SITL STARTUP SEQUENCE — read top to bottom, in order
+===================================================
 
+Mission Planner parameters (set once, via MP connected to SITL):
+  PLND_ENABLED = 1
+  PLND_TYPE = 1
+Then reboot SITL vehicle so it listens to LANDING_TARGET messages.
 
-Please open Mission Planner for your SITL vehicle and set:
+---------------------------------------------------
+TERMINAL 1 — Gazebo + Camera Stream
+---------------------------------------------------
+cd "/home/ace/DUMP/AEROCLUB/ADDC 2026/CODEBASE/RESOURCES/drone_pi"
+bash launch_sim.sh
 
-PLND_ENABLED = 1
-PLND_TYPE = 1 (or whichever PLND_EST_TYPE matches your ArduCopter version for MAVLink companion computer targeting)
-Once you set these and reboot the SITL vehicle, it will actually listen to the LANDING_TARGET messages and perform a precision descent instead of a blind one!
+Wait until you see:
+  [Msg] Loaded system [gz::sim::systems::ArduPilotPlugin]
+  [Dbg] ArduPilot ready, waiting for FCU...
+
+Then trigger the downward camera stream (in a separate terminal or same one):
+  gz topic -t /world/iris_runway/model/iris_with_gimbal/model/gimbal/link/pitch_link/sensor/camera/image/enable_streaming -m gz.msgs.Boolean -p "data: 1"
+  gz topic -t /gimbal/cmd_pitch -m gz.msgs.Double -p "data: 1.57"
+
+(If "topic not found", run: gz topic -l | grep camera)
+
+---------------------------------------------------
+TERMINAL 2 — ArduCopter SITL (The Brain)
+---------------------------------------------------
+cd ~/DUMP/AEROCLUB/"ADDC 2026"/CODEBASE/RESOURCES/drone_pi/ardupilot/ArduCopter
+../build/sitl/bin/arducopter --model JSON -I0 --defaults ../Tools/autotest/default_params/gazebo-iris.parm
+
+Wait for: "Waiting for connection ...."
+
+---------------------------------------------------
+TERMINAL 3 — MAVProxy bridge + Python Companion
+---------------------------------------------------
+# Verify config/mavlink.yaml has: port_sitl: "udp:127.0.0.1:14551"
+
+# Step 1: Start MAVProxy bridge
+source ~/venv-ardupilot/bin/activate
+mavproxy.py --master=tcp:127.0.0.1:5760 --out=tcpin:0.0.0.0:5764 --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551 --map --console
+
+Wait for MAVProxy to say "Got param..." or show flight data.
+
+# Step 2: Start Python Companion
+cd ~/DUMP/AEROCLUB/"ADDC 2026"/CODEBASE/RESOURCES/drone_pi/
+source drone_venv/bin/activate
+python3 main.py --sitl --gui
+
+---------------------------------------------------
+NOTES
+---------------------------------------------------
+- launch_sim.sh handles: ~/.gz creation, GZ_SIM_RESOURCE_PATH (no trailing colon),
+  GZ_SIM_SYSTEM_PLUGIN_PATH pointing to compiled ardupilot_gazebo_full/build/lib/
+- Local models in drone_pi/models/ override gz_ws models (adds model.config + meshes)
+- If Gazebo was rebuilt/updated: re-run build_ardupilot_plugin.sh to recompile
+- Mission Planner: connect to tcp:0.0.0.0:5764 from another machine (check ufw/iptables)

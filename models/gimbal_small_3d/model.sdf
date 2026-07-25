@@ -1,0 +1,132 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="gimbal_small_3d">
+    <pose>0 0 0.18 0 0 0</pose>
+
+    <!-- base_link: fixed attachment point -->
+    <link name="base_link">
+      <inertial>
+        <mass>0.2</mass>
+        <inertia>
+          <ixx>0.0001</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.0001</iyy><iyz>0</iyz><izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <visual name="base_visual">
+        <geometry><box><size>0.05 0.05 0.02</size></box></geometry>
+        <material><ambient>0.2 0.2 0.2</ambient><diffuse>0.3 0.3 0.3</diffuse></material>
+      </visual>
+      <collision name="base_collision">
+        <geometry><box><size>0.05 0.05 0.02</size></box></geometry>
+      </collision>
+    </link>
+
+    <!-- yaw_link -->
+    <link name="yaw_link">
+      <pose>0 0 -0.01 0 0 0</pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.00001</iyy><iyz>0</iyz><izz>0.00001</izz>
+        </inertia>
+      </inertial>
+      <visual name="yaw_visual">
+        <geometry><cylinder><radius>0.02</radius><length>0.01</length></cylinder></geometry>
+        <material><ambient>0.5 0.1 0.1</ambient><diffuse>0.7 0.2 0.2</diffuse></material>
+      </visual>
+    </link>
+
+    <!-- roll_link -->
+    <link name="roll_link">
+      <pose>0 0 -0.02 0 0 0</pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.00001</iyy><iyz>0</iyz><izz>0.00001</izz>
+        </inertia>
+      </inertial>
+      <visual name="roll_visual">
+        <geometry><cylinder><radius>0.018</radius><length>0.01</length></cylinder></geometry>
+        <material><ambient>0.1 0.5 0.1</ambient><diffuse>0.2 0.7 0.2</diffuse></material>
+      </visual>
+    </link>
+
+    <!-- pitch_link: holds the camera sensor -->
+    <link name="pitch_link">
+      <pose>0 0 -0.035 0 0 0</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.00001</iyy><iyz>0</iyz><izz>0.00001</izz>
+        </inertia>
+      </inertial>
+      <visual name="pitch_visual">
+        <geometry><box><size>0.04 0.04 0.03</size></box></geometry>
+        <material><ambient>0.1 0.1 0.5</ambient><diffuse>0.2 0.2 0.7</diffuse></material>
+      </visual>
+      <collision name="pitch_collision">
+        <geometry><box><size>0.04 0.04 0.03</size></box></geometry>
+      </collision>
+
+      <!-- Downward-facing camera -->
+      <sensor name="camera" type="camera">
+        <pose>0 0 -0.015 0 1.5707963 0</pose>
+        <camera>
+          <horizontal_fov>1.3962634</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.05</near>
+            <far>300</far>
+          </clip>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>30</update_rate>
+        <visualize>false</visualize>
+        <topic>/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/pitch_link/sensor/camera/image</topic>
+        <plugin
+          filename="gz-sim-camera-video-recorder-system"
+          name="gz::sim::systems::CameraVideoRecorder">
+        </plugin>
+      </sensor>
+    </link>
+
+    <!-- Joints -->
+    <joint name="yaw_joint" type="revolute">
+      <parent>base_link</parent>
+      <child>yaw_link</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit><lower>-1.5707963</lower><upper>1.5707963</upper></limit>
+        <dynamics><damping>0.5</damping></dynamics>
+      </axis>
+    </joint>
+
+    <joint name="roll_joint" type="revolute">
+      <parent>yaw_link</parent>
+      <child>roll_link</child>
+      <axis>
+        <xyz>1 0 0</xyz>
+        <limit><lower>-0.5236</lower><upper>0.5236</upper></limit>
+        <dynamics><damping>0.5</damping></dynamics>
+      </axis>
+    </joint>
+
+    <joint name="pitch_joint" type="revolute">
+      <parent>roll_link</parent>
+      <child>pitch_link</child>
+      <axis>
+        <xyz>0 1 0</xyz>
+        <limit><lower>-1.5707963</lower><upper>0.5236</upper></limit>
+        <dynamics><damping>0.5</damping></dynamics>
+      </axis>
+    </joint>
+
+  </model>
+</sdf>

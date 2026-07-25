@@ -204,15 +204,16 @@ class CameraManager:
             )
             logger.debug(f"Attempting Gazebo GStreamer capture with pipeline: {pipeline}")
             cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-            
-            if cap.isOpened():
-                # Avoid reading a test frame here as it might block the main thread 
-                # indefinitely if Gazebo is not streaming video yet.
-                self.cap = cap
-                self.camera_type = "Gazebo GStreamer"
-                logger.info("Camera initialized: Gazebo GStreamer")
-                return True
-            return False
+
+            if not cap.isOpened():
+                logger.warning("Gazebo GStreamer pipeline failed to open (Gazebo may not be streaming yet).")
+                cap.release()
+                return False
+
+            self.cap = cap
+            self.camera_type = "Gazebo GStreamer"
+            logger.info("Camera initialized: Gazebo GStreamer")
+            return True
         except Exception as e:
             logger.error(f"Gazebo GStreamer init failed: {e}")
             return False

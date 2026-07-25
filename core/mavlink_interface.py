@@ -56,6 +56,22 @@ class MAVLinkInterface:
         self._conn_start_time: float = 0.0   # wall-clock when connection was established
         self._vehicle_boot_ms_at_connect: int = 0  # first time_boot_ms seen after connect
 
+        # COMMAND_ACK cache for blocking confirmation
+        self._last_command_ack = None  # (command_id, result) tuple
+
+    def get_command_ack(self, command_id: int) -> Optional[int]:
+        """Check if the last COMMAND_ACK matches the given command ID.
+        
+        Returns the MAV_RESULT value if it matches, None if no matching ACK.
+        Clears the cached ACK after reading to prevent stale matches.
+        """
+        with self._lock:
+            if self._last_command_ack and self._last_command_ack[0] == command_id:
+                result = self._last_command_ack[1]
+                self._last_command_ack = None  # consume
+                return result
+        return None
+
     def start(self):
         """Start the background telemetry parsing and connection loop."""
         self._running = True
@@ -229,7 +245,8 @@ class MAVLinkInterface:
             _set_interval(245, 2.0)   # EXTENDED_SYS_STATE
             _set_interval(74,  2.0)   # VFR_HUD
             _set_interval(62,  2.0)   # NAV_CONTROLLER_OUTPUT
-            logger.info("Targeted MAVLink streams configured: ALL stopped, 5 messages at low rates.")
+            _set_interval(242, 0.5)   # HOME_POSITION — polled by REASSERT_HOME state
+            logger.info("Targeted MAVLink streams configured: ALL stopped, 6 messages at low rates.")
         except Exception as e:
             logger.warning(f"Failed to configure targeted streams: {e}")
 
@@ -250,6 +267,29 @@ class MAVLinkInterface:
         msg = self.get_message('LOCAL_POSITION_NED')
         if msg:
             return (float(msg.x), float(msg.y), float(msg.z))
+        return None
+
+    def get_global_position(self) -> Optional[Tuple[float, float, float]]:
+        """Return (lat_deg, lon_deg, alt_msl_m) from the cached GLOBAL_POSITION_INT.
+
+        GLOBAL_POSITION_INT is already requested at 4 Hz in _request_targeted_streams()
+        so no additional stream setup is required.
+
+        Wire units (MAVLink spec):
+          lat / lon : degE7  (integer degrees × 1e7)  → converted to float degrees
+          alt       : mm (MSL)                         → converted to metres
+
+        Returns:
+            Tuple (lat_deg, lon_deg, alt_msl_m), or None if the message has
+            not yet been received from the autopilot.
+        """
+        msg = self.get_message('GLOBAL_POSITION_INT')
+        if msg:
+            return (
+                float(msg.lat) / 1e7,    # degE7 → degrees
+                float(msg.lon) / 1e7,    # degE7 → degrees
+                float(msg.alt) / 1000.0  # mm    → metres (MSL)
+            )
         return None
 
     def get_gps_fix_type(self) -> int:
@@ -290,6 +330,43 @@ class MAVLinkInterface:
                 return True
             except Exception as e:
                 logger.error(f"Failed to send MAV_CMD ({command}): {e}")
+                return False
+
+    def send_command_int(self, command: int, frame: int = 0,
+                         param1: float = 0.0, param2: float = 0.0,
+                         param3: float = 0.0, param4: float = 0.0,
+                         x: int = 0, y: int = 0, z: float = 0.0) -> bool:
+        """Send a COMMAND_INT frame to the autopilot.
+
+        Unlike COMMAND_LONG, COMMAND_INT carries lat/lon as int32 (degE7) so
+        precision is ~0.01 mm vs ~1 m for a 32-bit float. Use this for all
+        geo-referenced commands (e.g. MAV_CMD_DO_SET_HOME).
+
+        Args:
+            command: MAVLink command ID.
+            frame:   Coordinate frame (MAV_FRAME_*). Default 0 = MAV_FRAME_GLOBAL.
+            param1-4: Command-specific float parameters.
+            x:       Latitude  in degE7 (int32).
+            y:       Longitude in degE7 (int32).
+            z:       Altitude in metres MSL (float).
+        """
+        with self._lock:
+            if not self._conn or not self._connected:
+                return False
+            try:
+                self._conn.mav.command_int_send(
+                    self._conn.target_system,
+                    self._conn.target_component,
+                    frame,
+                    command,
+                    0,    # current
+                    0,    # autocontinue
+                    param1, param2, param3, param4,
+                    x, y, z
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send COMMAND_INT ({command}): {e}")
                 return False
 
     def send_statustext(self, text: str, severity: int = 6) -> bool:
@@ -416,15 +493,23 @@ class MAVLinkInterface:
                             self._last_heartbeat_tick = self._tick_counter
                             # Identify as onboard computer so STATUSTEXT appears in Mission Planner
                             self._conn.mav.srcSystem = self._conn.target_system
-                            self._conn.mav.srcComponent = 191  # MAV_COMP_ID_ONBOARD_COMPUTER (not 190 which is MAV_COMP_ID_MISSIONPLANNER)
-                        
-                        # Phase C: replace MAV_DATA_STREAM_ALL blast with targeted
-                        # per-message intervals to reduce link saturation.
-                        # Only request messages we actually consume.
+                            self._conn.mav.srcComponent = 191  # MAV_COMP_ID_ONBOARD_COMPUTER
+
+                            # wait_heartbeat() consumes the first HB internally.
+                            # Seed our autopilot HB cache from it now so is_auto_mode/is_guided_mode
+                            # don't return False (HB-STALE) the instant MONITOR_AUTO ticks.
+                            seed_hb = conn.messages.get('HEARTBEAT')
+                            if seed_hb is not None:
+                                self._autopilot_hb = seed_hb
+                                self._autopilot_hb_recv_time = time.time()
+                                logger.info("Autopilot HB seeded from wait_heartbeat() — mode detection ready.")
+
+                        # Request targeted streams and reset reconnect backoff.
                         self._request_targeted_streams()
                         self._conn_start_time = time.time()
                         self._vehicle_boot_ms_at_connect = 0
                         reconnect_ticks = 0
+
                     else:
                         logger.warning("No autopilot link established. Retrying...")
                         reconnect_ticks = self.reconnect_delay_ticks
@@ -553,6 +638,14 @@ class MAVLinkInterface:
                                     self.sprayer_detected = True
                         except Exception as e:
                             logger.debug(f"STATUSTEXT parse error: {e}")
+
+                    # Listen for command acknowledgements
+                    elif msg_type == 'COMMAND_ACK':
+                        cmd = msg.command
+                        result = msg.result
+                        with self._lock:
+                            self._last_command_ack = (cmd, result)
+                        logger.debug(f"COMMAND_ACK: cmd={cmd} result={result}")
 
 
             except Exception as e:

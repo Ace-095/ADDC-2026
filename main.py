@@ -6,6 +6,13 @@ import signal
 import logging
 import time
 import yaml
+import os
+
+# Suppress GStreamer and OpenCV warnings (Ponytail approach: noisy logs == bad)
+os.environ["GST_DEBUG"] = "0"
+os.environ["OPENCV_LOG_LEVEL"] = "FATAL"
+os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
+
 import cv2
 import argparse
 import threading
@@ -58,6 +65,7 @@ from vision.camera_manager import CameraManager
 from vision.qr_detector import QRDetector
 from vision.alignment_controller import AlignmentController
 from vision.qr_decoder import QRDecoder
+from vision.platform_detector import PlatformDetector
 from vision.vision_pipeline import VisionPipeline
 
 
@@ -135,6 +143,7 @@ class DroneSystem:
             qr_size_cm=self.config['vision']['qr_size_cm'],
             fov_horizontal_deg=self.config['camera'].get('fov_horizontal_deg', 66.0)
         )
+        logger.info(f"QR gate: min_width_px={self.qr_detector.min_width_px}")
         
         self.alignment_controller = AlignmentController(self.config)
         
@@ -142,12 +151,21 @@ class DroneSystem:
             max_attempts=self.config['qr_decode']['max_attempts']
         )
         
+        platform_cfg = self.config.get('platform', {})
+        self.platform_detector = PlatformDetector(
+            marker_id=platform_cfg.get('marker_id', 0),
+            marker_size_cm=platform_cfg.get('marker_size_cm', 30.0),
+            aruco_dict_name=platform_cfg.get('aruco_dict', 'DICT_4X4_50'),
+            min_width_px=platform_cfg.get('min_marker_width_px', 40)
+        )
+
         self.vision_pipeline = VisionPipeline(
             camera=self.camera,
             qr_detector=self.qr_detector,
             qr_decoder=self.qr_decoder,
             alignment_controller=self.alignment_controller,
-            flight_control=self.flight_control
+            flight_control=self.flight_control,
+            platform_detector=self.platform_detector
         )
         
         self.state_machine = StateMachine(

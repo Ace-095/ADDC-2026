@@ -6,6 +6,7 @@ flight:
   approach_altitude_m: 5.0            # Search altitude above ground (m) — QR detection begins here
   takeoff_altitude_threshold_m: 1.0   # FSM waits for alt > this before transitioning out of TAKEOFF
   anchor_capture_timeout_s: 8.0       # GUIDED_HOLD hard limit (s) waiting for LOCAL_POSITION_NED before aborting to RTL
+  home_capture_min_gps_fix: 3         # Minimum GPS fix type to latch true_home (3=3D Fix, 5=RTK Float, 6=RTK Fixed)
 
   # Search speed control — sent to autopilot via MAV_CMD_DO_CHANGE_SPEED (cmd 178).
   # At 5m AGL with 66° FOV the camera footprint is ~4.4m wide.

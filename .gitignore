@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 drone_venv/
 *.log
+force_update.sh
