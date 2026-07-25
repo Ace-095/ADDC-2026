@@ -26,6 +26,7 @@ class State(Enum):
     CLIMB = auto()
     RETURN_TO_ORIGIN = auto()
     RTL = auto()
+    MISSION_COMPLETE = auto()
 
 
 class StateMachine:
@@ -705,10 +706,11 @@ class StateMachine:
         # Platform landing: no payload release — just precision descent → disarm
         if self.landing_context == 'platform':
             if self.fc.is_landed():
-                logger.info("PLATFORM LANDING COMPLETE. Vehicle is on the ground.")
-                self.vision.set_detection_mode('qr')  # restore default
-                self.fc.mav.send_statustext("MISSION COMPLETE: Platform landing confirmed")
-                # Terminal state
+                if self.state != State.MISSION_COMPLETE:
+                    logger.info("PLATFORM LANDING COMPLETE. Vehicle is on the ground.")
+                    self.vision.set_detection_mode('qr')  # restore default
+                    self.fc.mav.send_statustext("MISSION COMPLETE: Platform landing confirmed")
+                    self._transition(State.MISSION_COMPLETE, tick_count)  # new terminal state, ticks silently
             return
 
         # Altitude drop gate checks (only if payload not released yet)
