@@ -136,6 +136,38 @@ class MAVLinkInterface:
                 logger.error(f"Failed to send velocity: {e}")
                 return False
 
+    def set_guided_yaw_rate(self, yaw_rate_deg_s: float) -> bool:
+        """Command a body yaw rate in GUIDED (degrees/second).
+
+        Used by INITIAL_SCAN's optional slow yaw-sweep (CHANGE 4) to widen the
+        downward camera footprint without translating XY. Sends a velocity-only
+        position target in the BODY frame with the yaw_rate field populated.
+        Positive yaw_rate = clockwise (ArduPilot convention).
+        """
+        with self._lock:
+            if not self._conn or not self._connected:
+                return False
+            try:
+                # typemask: ignore pos (1|2|4), ignore vel (8|16|32) -> keep zero vel (hold),
+                # ignore acc (64|128|256), keep yaw_rate (NOT setting bit 2048 means use it).
+                # 0b00001000_01000111 = ignore pos + acc, use vel=0 + yaw_rate.
+                self._conn.mav.set_position_target_local_ned_send(
+                    0,
+                    self._conn.target_system,
+                    self._conn.target_component,
+                    mavutil.mavlink.MAV_FRAME_BODY_NED,
+                    0b00001000_01000111,
+                    0.0, 0.0, 0.0,        # position (ignored)
+                    0.0, 0.0, 0.0,        # velocity = 0 (hold XY + alt)
+                    0.0, 0.0, 0.0,        # accel (ignored)
+                    0.0,                  # yaw (ignored)
+                    float(yaw_rate_deg_s) # yaw_rate (deg/s)
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send yaw rate: {e}")
+                return False
+
     def set_position_target_local_ned(self, x: float, y: float, z: float) -> bool:
         """
         Send a local NED position setpoint command to ArduPilot.
@@ -410,6 +442,36 @@ class MAVLinkInterface:
                 return True
             except Exception as e:
                 logger.error(f"Failed to send LANDING_TARGET message: {e}")
+                return False
+
+    def set_param(self, param_id: str, param_value: float, param_type: int = 9) -> bool:
+        """Set an ArduPilot parameter via PARAM_SET (CHANGE 5 search tuning).
+
+        Used to tighten navigation accel/decel for the slow, precise search
+        pattern and restore them afterward. param_type 9 = MAV_PARAM_TYPE_REAL32
+        (float), the type of the WPNAV_* navigation parameters.
+
+        Args:
+            param_id: Parameter name (max 16 chars, e.g. 'WPNAV_ACCEL').
+            param_value: New value.
+            param_type: MAV_PARAM_TYPE (default 9 = REAL32).
+        """
+        with self._lock:
+            if not self._conn or not self._connected:
+                return False
+            try:
+                pid = param_id.encode('utf-8')[:16]
+                self._conn.mav.param_set_send(
+                    self._conn.target_system,
+                    self._conn.target_component,
+                    pid,
+                    float(param_value),
+                    param_type,
+                )
+                logger.info(f"PARAM_SET sent: {param_id} = {param_value}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send PARAM_SET {param_id}: {e}")
                 return False
 
     def request_mission_item(self, seq: int) -> bool:

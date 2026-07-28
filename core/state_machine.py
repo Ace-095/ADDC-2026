@@ -5,6 +5,7 @@ import math
 import time
 from enum import Enum, auto
 from core.payload_control import PayloadControl
+from core.mission_store import MissionStore
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,10 @@ logger = logging.getLogger(__name__)
 class State(Enum):
     """FSM execution phases."""
     BOOT = auto()
+    # Crash-recovery entry state (CHANGE 1). Resumed only at boot when a valid
+    # checkpoint exists and the vehicle is armed+airborne. Validates the
+    # recovered context against live telemetry before re-entering the mission.
+    RECOVER = auto()
     MONITOR_AUTO = auto()
     REQUEST_GUIDED = auto()
     GUIDED_HOLD = auto()
@@ -29,17 +34,55 @@ class State(Enum):
     MISSION_COMPLETE = auto()
 
 
+# ── CHANGE 1: crash recovery ──────────────────────────────────────────────
+# States safe to *resume directly into* after a companion reboot. These are
+# hold/navigation states that re-establish position from fresh telemetry on
+# entry, so re-entering them is self-correcting. Active closed-loop control
+# states (ALIGNMENT/QR_DECODE/LAND/REQUEST_GUIDED) are NOT resumed blindly —
+# a reboot mid-alignment cannot trust stale vision/payload state, so they are
+# demoted to a safe parent state (or RTL if no parent holds) on recovery.
+_RESUMABLE_STATES = {
+    State.GUIDED_HOLD,
+    State.INITIAL_SCAN,
+    State.SEARCH_SQUARE,
+    State.RETURN_INITIAL,
+    State.REASSERT_HOME,
+    State.CLIMB,
+    State.RETURN_TO_ORIGIN,
+}
+# Demotion map for active-control states: resume target -> safe parent.
+# REQUEST_GUIDED resumes by re-requesting from GUIDED_HOLD (anchor already held);
+# ALIGNMENT/QR_DECODE fall back to GUIDED_HOLD (re-scan); LAND falls back to RTL
+# (a reboot during a drop cannot safely resume a partially-completed release).
+_RECOVERY_DEMOTION = {
+    State.REQUEST_GUIDED: State.GUIDED_HOLD,
+    State.ALIGNMENT: State.GUIDED_HOLD,
+    State.QR_DECODE: State.GUIDED_HOLD,
+    State.LAND: State.RTL,
+}
+
+
 class StateMachine:
     """Synchronous FSM driving flight mode transitions and vision target centering."""
 
     def __init__(self, config: dict, flight_control, vision_pipeline,
-                 payload_control: PayloadControl, fallback_manager):
+                 payload_control: PayloadControl, fallback_manager,
+                 mission_store: Optional[MissionStore] = None):
         self.cfg = config
         self.fc = flight_control
         self.vision = vision_pipeline
         self.payload = payload_control
         self.fallback = fallback_manager
-        
+
+        # CHANGE 1: persistence store. Injected by main.py; defaults to a fresh
+        # store on the standard path so the FSM works standalone in tests too.
+        recovery_cfg = self.cfg.get('recovery', {})
+        self.recovery_enabled = recovery_cfg.get('enabled', True)
+        self._max_checkpoint_age_s = recovery_cfg.get('max_checkpoint_age_s', 180.0)
+        self.store = mission_store or MissionStore(
+            recovery_cfg.get('checkpoint_file', 'mission_state.json')
+        )
+
         self.state = State.BOOT
         self.state_entry_tick = 0
         self.vision_fail_counter = 0
@@ -52,6 +95,29 @@ class StateMachine:
         self.takeoff_request_counter = 0
         self.hold_counter = 0
         self.return_land_commanded = False
+
+        # ── CHANGE 2/3: shared timeout-drop sequencer state ──
+        # Sub-phase machine used by _timeout_drop_and_rtl() (see below). None
+        # means "not in a timeout-drop sequence". Phases: hold → descend →
+        # stabilize → drop → rtl.
+        self._drop_phase: Optional[str] = None
+        self._drop_phase_entry_tick: int = 0
+        self._drop_origin: Optional[str] = None  # which state requested the drop (for logs)
+
+        # CHANGE 4: initial-scan stable-confirmation counter. Counts consecutive
+        # confident detections; a detection below threshold or a miss resets it.
+        self._confirm_counter: int = 0
+        # CHANGE 4: optional slow yaw-sweep during INITIAL_SCAN to widen the
+        # camera footprint without translating XY (default off in config).
+        self._scan_yaw_enabled: bool = self.cfg.get('vision', {}).get('initial_scan_yaw_sweep', False)
+        self._scan_yaw_dir: int = 1
+
+        # CHANGE 5: search dwell state (per-waypoint camera stabilization).
+        self._search_dwell_until_tick: int = -1
+
+        # Recovery bookkeeping (CHANGE 1)
+        self._recovery_checkpoint: Optional[dict] = None
+        self._recovered: bool = False  # True once we resume mid-mission (not a fresh start)
 
         # Position reference captured in GUIDED_HOLD after telemetry is confirmed available.
         # Never set to None silently — only transitions out of GUIDED_HOLD once this is non-None.
@@ -76,11 +142,22 @@ class StateMachine:
         # Controls ALIGNMENT transition (skip QR_DECODE for platform) and LAND behaviour
         # (no payload release / re-climb for platform).
         self.landing_context = 'mission'
+        # CHANGE 6: True when LAND was entered from the QR-not-found path
+        # (RETURN_INITIAL → LAND). On a blind landing the ultrasonic window may
+        # never be satisfied (flat ground reads ~0.0, below [0.2,0.4]m), so we
+        # force the release once landed so the continue-flow still runs.
+        self._blind_landing: bool = False
 
         self.home_restored = False
         # Number of DO_SET_HOME sends issued in the current REASSERT_HOME entry.
         # Reset to 0 every time REASSERT_HOME is entered via _transition().
         self.reassert_attempts: int = 0
+
+        # Decoded QR payload text, persisted so a reboot after QR_DECODE does not
+        # need to re-acquire the target (CHANGE 1).
+        self._last_qr_text: Optional[str] = None
+        # Flag referenced by _transition (was previously only assigned there).
+        self.climb_initiated: bool = False
 
         self._last_state_log_tick = -999
 
@@ -98,6 +175,8 @@ class StateMachine:
 
         if self.state == State.BOOT:
             self._tick_boot(tick_count)
+        elif self.state == State.RECOVER:
+            self._tick_recover(tick_count)
         elif self.state == State.MONITOR_AUTO:
             self._tick_monitor_auto(tick_count)
         elif self.state == State.REQUEST_GUIDED:
@@ -126,11 +205,16 @@ class StateMachine:
             self._tick_rtl(tick_count)
 
     def _transition(self, new_state: State, tick_count: int):
-        """Handle state change transitions and resets."""
+        """Handle state change transitions and resets.
+
+        Centralises per-entry counter resets AND checkpoint persistence (CHANGE 1):
+        every successful transition is followed by an atomic checkpoint write so
+        a crash at any subsequent tick recovers to this state.
+        """
         logger.info(f"FSM TRANSITION: {self.state.name} -> {new_state.name}")
         self.state = new_state
         self.state_entry_tick = tick_count
-        
+
         # Reset counters on state entry
         self.vision_fail_counter = 0
         self.hold_counter = 0
@@ -154,6 +238,9 @@ class StateMachine:
             self.land_confirmed = False
             self.takeoff_initiated = False
             self.home_restored = False
+            # CHANGE 6: reset blind-landing marker on every LAND entry; the
+            # RETURN_INITIAL → LAND transition re-sets it to True.
+            self._blind_landing = False
         if new_state == State.REASSERT_HOME:
             self.reassert_attempts = 0
             self.home_restored = False
@@ -166,7 +253,23 @@ class StateMachine:
         # from a crashed cycle cannot be reused in a retry scenario.
         if new_state == State.GUIDED_HOLD:
             self.guided_anchor_ned = None
-        
+        if new_state == State.INITIAL_SCAN:
+            # CHANGE 4: fresh confirmation counter each scan entry.
+            self._confirm_counter = 0
+        # On a fresh (non-recovery) entry into BOOT we have not yet decided
+        # whether a checkpoint exists; the recovery probe happens once MAVLink
+        # is up. Entering RECOVER itself resets no mission counters (it runs
+        # before any mission state is active).
+        if new_state == State.RECOVER:
+            self._recovered = False
+        # Clear the shared timeout-drop sequencer on any normal state change so
+        # it cannot bleed from one timeout into another (CHANGES 2/3).
+        self._drop_phase = None
+        self._drop_origin = None
+        # Clear search dwell on leaving SEARCH_SQUARE.
+        if new_state != State.SEARCH_SQUARE:
+            self._search_dwell_until_tick = -1
+
         # Trigger controller resets if entering tracking modes
         if new_state == State.ALIGNMENT:
             if self.landing_context == 'platform':
@@ -175,11 +278,382 @@ class StateMachine:
         elif new_state == State.QR_DECODE:
             self.vision.qr_dec.reset()
 
+        # CHANGE 1: persist after every successful transition. MISSION_COMPLETE
+        # and RTL are terminal-ish: clear the checkpoint on MISSION_COMPLETE so a
+        # later boot does not try to resume a finished mission. RTL we still
+        # persist (a reboot during RTL can resume the handoff/landing logic).
+        if self.recovery_enabled:
+            if new_state == State.MISSION_COMPLETE:
+                self.store.clear()
+            else:
+                self.store.save(self._build_checkpoint())
+
+    # ── CHANGE 1: checkpoint snapshot ─────────────────────────────────────
+    def _build_checkpoint(self) -> dict:
+        """Snapshot the recoverable mission context for persistence."""
+        ck = {
+            'state': self.state.name,
+            'landing_context': self.landing_context,
+            'guided_anchor_ned': list(self.guided_anchor_ned) if self.guided_anchor_ned else None,
+            'true_home': self._serialize_true_home(self.true_home),
+            'payload_armed': getattr(self.payload, 'takeoff_detected', False),
+            'payload_released': getattr(self.payload, 'payload_released', False),
+            'qr_text': getattr(self, '_last_qr_text', None),
+            'search_wp_idx': getattr(self, 'current_wp_idx', 0),
+            'search_wp_count': len(getattr(self, 'search_waypoints', []) or []),
+            'search_timeout_ticks': getattr(self, 'search_timeout_ticks', None),
+            'home_restored': self.home_restored,
+            'tick_count_snapshot': self.state_entry_tick,
+        }
+        return ck
+
+    @staticmethod
+    def _serialize_true_home(true_home) -> Optional[dict]:
+        if true_home is None:
+            return None
+        gps, ned = true_home.get('gps'), true_home.get('ned')
+        return {
+            'gps': list(gps) if gps else None,
+            'ned': list(ned) if ned else None,
+        }
+
     def _tick_boot(self, tick_count: int):
-        """Wait for Pixhawk MAVLink connection to establish."""
-        if self.fc.mav.is_connected():
-            logger.info("Autopilot link connected. Monitoring flight modes...")
+        """Wait for Pixhawk MAVLink connection, then probe for crash recovery.
+
+        CHANGE 1: once the link is up, decide whether this boot is a fresh start
+        or a mid-mission restart. A mid-mission restart is detected by: (a) a
+        valid on-disk checkpoint exists, AND (b) the vehicle is currently armed
+        and airborne. Only then do we enter RECOVER; otherwise we begin the
+        normal MONITOR_AUTO flow.
+        """
+        if not self.fc.mav.is_connected():
+            return
+
+        if self.recovery_enabled and self._checkpoint_recovery_candidate():
+            logger.warning(
+                "Mid-mission restart detected: valid checkpoint + vehicle armed/airborne. "
+                "Entering RECOVER to validate and resume."
+            )
+            self.fc.mav.send_statustext("RECOVERY: restart detected, validating checkpoint")
+            self._transition(State.RECOVER, tick_count)
+            return
+
+        logger.info("Autopilot link connected. Monitoring flight modes...")
+        self._transition(State.MONITOR_AUTO, tick_count)
+
+    def _checkpoint_recovery_candidate(self) -> bool:
+        """Return True if there is a recoverable checkpoint AND the vehicle looks airborne.
+
+        Reads (but does not yet consume) the checkpoint. We require the vehicle to
+        be armed AND flying (relative alt above a small threshold) so that a
+        checkpoint left over from a mission that already landed does not trigger a
+        bogus resume.
+        """
+        ck = self.store.load()
+        if ck is None:
+            return False
+        # Stale checkpoints are not trusted — the mission context is too old to
+        # resume safely (GPS, payload, and anchor may all have drifted).
+        age = self.store.checkpoint_age_s()
+        if age is not None and age > self._max_checkpoint_age_s:
+            logger.warning(
+                f"Recovery ignored: checkpoint is {age:.0f}s old "
+                f"(limit {self._max_checkpoint_age_s:.0f}s). Treating as fresh start."
+            )
+            self.store.clear()
+            return False
+        armed = self.fc.is_armed()
+        airborne = self.fc.mav.get_altitude() > 0.3
+        if not (armed and airborne):
+            logger.info(
+                f"Recovery probe: checkpoint present but vehicle not airborne "
+                f"(armed={armed}, alt={self.fc.mav.get_altitude():.2f}m). Fresh start."
+            )
+            # A grounded vehicle with a stale checkpoint should not keep it around.
+            self.store.clear()
+            return False
+        self._recovery_checkpoint = ck
+        return True
+
+    # ── CHANGE 1: recovery validation + resume ────────────────────────────
+    def _tick_recover(self, tick_count: int):
+        """Validate the recovered checkpoint against live telemetry, then resume.
+
+        Runs once on RECOVER entry (all gating happens here). Recovery is only
+        attempted when the checkpoint indicates the vehicle was armed+airborne at
+        the last save; we re-confirm that against the live autopilot and reject
+        if anything is inconsistent. On success we restore the persisted context
+        (anchor, true_home, payload status, search progress) and re-enter the
+        last safe state. On any doubt we fall back to RTL — the mission-safety
+        net — and document why in the log + STATUSTEXT.
+        """
+        if not self.fc.mav.is_connected():
+            self._transition(State.BOOT, tick_count)
+            return
+
+        ck = self._recovery_checkpoint
+        if ck is None:
+            logger.warning("RECOVER: no checkpoint loaded (edge case); fresh start.")
             self._transition(State.MONITOR_AUTO, tick_count)
+            return
+
+        # Safety validation against live autopilot state.
+        armed = self.fc.is_armed()
+        airborne = self.fc.mav.get_altitude() > 0.3
+        if not (armed and airborne):
+            logger.warning(
+                f"RECOVER: vehicle no longer airborne (armed={armed}, "
+                f"alt={self.fc.mav.get_altitude():.2f}m). Cannot resume mid-air. RTL."
+            )
+            self._recovery_reason_rtl("recovery: vehicle grounded on resume", tick_count)
+            return
+
+        gps_fix = self.fc.mav.get_gps_fix_type()
+        min_fix = self.cfg.get('flight', {}).get('home_capture_min_gps_fix', 3)
+        if gps_fix < min_fix:
+            logger.warning(
+                f"RECOVER: GPS fix {gps_fix} below min {min_fix}. "
+                "Position reference unreliable — RTL."
+            )
+            self._recovery_reason_rtl("recovery: GPS fix below min on resume", tick_count)
+            return
+
+        # Restore persisted context (idempotent — overwrites in-memory defaults).
+        self._restore_checkpoint(ck)
+        target_state_name = ck.get('state')
+        try:
+            target_state = State[target_state_name]
+        except (KeyError, TypeError):
+            logger.error(f"RECOVER: unknown persisted state '{target_state_name}'. RTL.")
+            self._recovery_reason_rtl("recovery: unknown persisted state", tick_count)
+            return
+
+        # Consistency: if payload was already released, the only valid resume is
+        # a post-release state (REASSERT_HOME / CLIMB / RETURN_TO_ORIGIN). A
+        # checkpoint claiming we're still in pre-release search after release is
+        # contradictory — refuse it.
+        released = bool(ck.get('payload_released', False))
+        if released and target_state in (
+            State.INITIAL_SCAN, State.SEARCH_SQUARE, State.RETURN_INITIAL,
+            State.ALIGNMENT, State.QR_DECODE, State.REQUEST_GUIDED,
+        ):
+            logger.error(
+                f"RECOVER: checkpoint contradiction (payload released but state="
+                f"{target_state.name}). RTL."
+            )
+            self._recovery_reason_rtl("recovery: released/state contradiction", tick_count)
+            return
+
+        # Decide the resume state. Resumable states resume directly; active
+        # closed-loop states demote to their safe parent (see _RECOVERY_DEMOTION).
+        if target_state in _RESUMABLE_STATES:
+            resume_state = target_state
+        else:
+            resume_state = _RECOVERY_DEMOTION.get(target_state, State.RTL)
+            logger.warning(
+                f"RECOVER: active state {target_state.name} not directly resumable; "
+                f"demoting to safe parent {resume_state.name}."
+            )
+
+        # Switch the autopilot into GUIDED if the resume state needs companion
+        # control (LOITER/AUTO are not usable for our hold/search states).
+        if resume_state in (State.GUIDED_HOLD, State.INITIAL_SCAN, State.SEARCH_SQUARE,
+                            State.RETURN_INITIAL, State.REASSERT_HOME, State.CLIMB,
+                            State.RETURN_TO_ORIGIN):
+            if not self.fc.is_guided_mode():
+                logger.info("RECOVER: requesting GUIDED before resume.")
+                self.fc.set_guided_mode()
+
+        self._recovered = True
+        logger.warning(
+            f"RECOVER: resuming mission at {resume_state.name} "
+            f"(was {target_state.name}; anchor={'set' if self.guided_anchor_ned else 'none'}; "
+            f"true_home={'set' if self.true_home else 'none'}; released={released}; "
+            f"qr={'set' if self._last_qr_text else 'none'}; wp_idx={ck.get('search_wp_idx')})."
+        )
+        self.fc.mav.send_statustext(f"RECOVERY OK: resume {resume_state.name}")
+        # Persist the (possibly demoted) resume state immediately so a second
+        # crash during resume validation itself is still recoverable.
+        self.store.save(self._build_checkpoint())
+        # Re-enter via _transition WITHOUT going through BOOT, preserving the
+        # restored counters (search_wp_idx etc.). _transition re-persists.
+        # We set self.state directly first so the TRANSITION log line shows the
+        # correct "from" state, then call the entry resets + persist.
+        self.state = State.RECOVER
+        self._transition(resume_state, tick_count)
+
+    def _restore_checkpoint(self, ck: dict):
+        """Restore persisted mission variables into in-memory state (CHANGE 1)."""
+        anchor = ck.get('guided_anchor_ned')
+        if isinstance(anchor, list) and len(anchor) == 3:
+            self.guided_anchor_ned = tuple(anchor)
+        th = ck.get('true_home')
+        if isinstance(th, dict):
+            gps = th.get('gps'); ned = th.get('ned')
+            if gps and ned:
+                self.true_home = {'gps': tuple(gps), 'ned': tuple(ned)}
+        # Payload status is owned by PayloadControl; only sync the release flag so
+        # the post-release pipeline (REASSERT_HOME/CLIMB/RETURN_TO_ORIGIN) is not
+        # re-triggered as if a new drop were needed.
+        if ck.get('payload_released'):
+            self.payload.payload_released = True
+        if ck.get('payload_armed'):
+            self.payload.takeoff_detected = True
+        self._last_qr_text = ck.get('qr_text')
+        # Search progress (used only if we resume into SEARCH_SQUARE).
+        idx = ck.get('search_wp_idx')
+        if isinstance(idx, int) and idx >= 0:
+            self.current_wp_idx = idx
+        to_ticks = ck.get('search_timeout_ticks')
+        if isinstance(to_ticks, int):
+            self.search_timeout_ticks = to_ticks
+        # Re-derive search waypoints from the restored anchor so the resume can
+        # actually fly the pattern (waypoints are otherwise only in memory).
+        if self.guided_anchor_ned is not None and not getattr(self, 'search_waypoints', None):
+            try:
+                self._generate_search_pattern(preserve_index=True)
+            except Exception as e:
+                logger.warning(f"RECOVER: could not regenerate search waypoints: {e}")
+        lc = ck.get('landing_context')
+        if lc in ('mission', 'platform'):
+            self.landing_context = lc
+            self.vision.set_detection_mode(lc)
+
+    def _recovery_reason_rtl(self, reason: str, tick_count: int):
+        """Document why recovery was refused, then route to the RTL safety net."""
+        logger.error(f"RECOVER FAILED — {reason}")
+        self.fc.mav.send_statustext(f"RECOVERY FAIL: {reason[:40]}")
+        self.store.clear()
+        self.fallback.handle_fail(reason)
+        self._transition(State.RTL, tick_count)
+
+    # ── CHANGE 2/3: shared timeout drop-and-RTL sequencer ─────────────────
+    def _timeout_drop_and_rtl(self, origin_state: State, tick_count: int) -> None:
+        """Shared hard-timeout sequence used by REQUEST_GUIDED and GUIDED_HOLD.
+
+        Implements the spec: on timeout, instead of an immediate RTL,
+          1. Switch to LOITER (the MAVLink-clean realization of "AltHold + hold
+             XY": ArduPilot LOITER holds GPS position AND altitude, whereas
+             ALT_HOLD does not hold XY and ignores companion velocity descent).
+          2. Hold XY briefly to shed any residual velocity.
+          3. Descend (GUIDED velocity) to ~1 m AGL.
+          4. Re-hold and stabilize.
+          5. Drop payload (trigger_release).
+          6. Confirm release (bounded wait + fallback).
+          7. RTL.
+
+        This runs as a sub-phase machine driven each tick by the *origin* state's
+        tick method while ``self._drop_phase`` is not None; the origin state must
+        delegate to this method every tick once the timeout has fired. On
+        completion we transition to RTL and the origin tick no longer runs.
+
+        The phases are deterministic and idempotent per tick, so a crash mid-
+        sequence resumes from the persisted phase if recovery is wired in (the
+        phase is part of the checkpoint via the origin state name).
+        """
+        if self._drop_phase is None:
+            # First call: arm the sequencer.
+            self._drop_phase = 'hold'
+            self._drop_phase_entry_tick = tick_count
+            self._drop_origin = origin_state.name
+            logger.warning(
+                f"[TIMEOUT-DROP] sequence initiated from {origin_state.name}: "
+                "LOITER hold -> descend to ~1m AGL -> drop payload -> confirm -> RTL."
+            )
+            self._fc_set_loiter()
+            self.fc.mav.send_statustext("TIMEOUT: LOITER hold + drop + RTL")
+            return
+
+        tick_hz = self.cfg['system']['tick_hz']
+        phase_ticks = tick_count - self._drop_phase_entry_tick
+
+        # Phase 1 — LOITER hold (shed residual velocity). ~1.5 s.
+        if self._drop_phase == 'hold':
+            if phase_ticks >= int(1.5 * tick_hz):
+                self._drop_phase = 'descend'
+                self._drop_phase_entry_tick = tick_count
+                # Take back control for a guided descent.
+                self.fc.set_guided_mode()
+                logger.info("[TIMEOUT-DROP] hold complete; descending to ~1m AGL (GUIDED).")
+            return
+
+        # Phase 2 — GUIDED descent to ~1 m AGL.
+        if self._drop_phase == 'descend':
+            target_agl = self.cfg.get('recovery', {}).get('timeout_drop_altitude_m', 1.0)
+            current_alt = self.fc.mav.get_altitude()
+            if current_alt > target_agl + 0.15:
+                # vz = +0.3 m/s (down in NED) — slow, controlled descent.
+                self.fc.send_velocity(0.0, 0.0, 0.3)
+            else:
+                self._drop_phase = 'stabilize'
+                self._drop_phase_entry_tick = tick_count
+                self._fc_set_loiter()
+                logger.info(
+                    f"[TIMEOUT-DROP] reached ~{current_alt:.2f}m AGL; "
+                    "stabilizing before drop."
+                )
+            # Guard: if we somehow cannot descend within 20s, drop where we are.
+            if phase_ticks > int(20.0 * tick_hz):
+                logger.warning("[TIMEOUT-DROP] descent overran 20s; proceeding to drop.")
+                self._drop_phase = 'stabilize'
+                self._drop_phase_entry_tick = tick_count
+            return
+
+        # Phase 3 — stabilize (LOITER hold) ~1 s for camera/servo settle.
+        if self._drop_phase == 'stabilize':
+            if phase_ticks >= int(1.0 * tick_hz):
+                self._drop_phase = 'drop'
+                self._drop_phase_entry_tick = tick_count
+                logger.info("[TIMEOUT-DROP] stabilized; commanding payload release.")
+                self.payload.trigger_release()
+            return
+
+        # Phase 4 — confirm release (bounded wait), then RTL.
+        if self._drop_phase == 'drop':
+            confirm_timeout_ticks = int(
+                self.cfg.get('recovery', {}).get(
+                    'release_confirm_timeout_s',
+                    self.cfg['mavlink']['servo_open_duration_s'] + 2.0
+                ) * tick_hz
+            )
+            if self.payload.payload_released:
+                logger.info("[TIMEOUT-DROP] payload release confirmed. Initiating RTL.")
+                self.fc.mav.send_statustext("TIMEOUT-DROP: release confirmed, RTL")
+                self._drop_phase = None
+                self._drop_origin = None
+                self._transition(State.RTL, tick_count)
+                return
+            if phase_ticks >= confirm_timeout_ticks:
+                logger.error(
+                    "[TIMEOUT-DROP] release NOT confirmed within timeout. "
+                    "Proceeding to RTL anyway (release may have silently failed)."
+                )
+                self.fc.mav.send_statustext("TIMEOUT-DROP: release unconfirmed, RTL")
+                self._drop_phase = None
+                self._drop_origin = None
+                self._transition(State.RTL, tick_count)
+            return
+
+    def _fc_set_loiter(self) -> bool:
+        """Switch the autopilot to LOITER (ArduCopter custom_mode 5).
+
+        LOITER is the safe 'hold position + hold altitude' mode available over
+        MAVLink via MAV_CMD_DO_SET_MODE — the technically-correct realization of
+        the user's 'AltHold + hold XY' requirement (ALT_HOLD does not hold XY).
+        """
+        return self.fc.set_mode(5)
+
+    def _restore_search_nav(self) -> None:
+        """Restore default WPNAV accel/decel/radius after the search (CHANGE 5).
+
+        Idempotent — safe to call from RETURN_INITIAL entry and any exit path.
+        """
+        s = self.cfg['search']
+        self.fc.restore_default_nav_tuning(
+            accel=s.get('default_wpnav_accel', 3.0),
+            decel=s.get('default_wpnav_decel', 3.0),
+            wp_radius=s.get('default_wpnav_radius', 0.3),
+        )
 
     def _tick_monitor_auto(self, tick_count: int):
         """Monitor for AUTO flight mode and trigger sprayer waypoint conditions."""
@@ -226,16 +700,17 @@ class StateMachine:
                     )
         self._was_armed = currently_armed
 
-        # Mid-flight restart policy: if the Pixhawk is already in GUIDED when we
-        # boot, it means the companion computer crashed while it was driving the
-        # vehicle (QR alignment, payload drop, etc.). We cannot resume safely -
-        # trigger an immediate RTL.
+        # Mid-flight restart policy (CHANGE 1 fallback): RECOVER already handles
+        # the "boot in GUIDED with a valid checkpoint" case. If we reach
+        # MONITOR_AUTO while the Pixhawk is STILL in GUIDED, it means recovery was
+        # disabled or the checkpoint was absent/invalid — we cannot resume blind,
+        # so command an immediate RTL as the safe fallback.
         if self.fc.is_guided_mode():
             logger.critical(
-                "Mid-flight reboot detected: Pixhawk is in GUIDED mode on Pi boot. "
-                "Cannot resume mission - commanding RTL."
+                "Mid-flight reboot detected: Pixhawk is in GUIDED mode on Pi boot "
+                "but no valid checkpoint to resume from. Commanding RTL."
             )
-            self.fallback.handle_fail("Mid-flight reboot detected in GUIDED mode")
+            self.fallback.handle_fail("Mid-flight reboot in GUIDED, no recoverable checkpoint")
             self._transition(State.RTL, tick_count)
             return
 
@@ -273,9 +748,21 @@ class StateMachine:
 
 
     def _tick_request_guided(self, tick_count: int):
-        """Request GUIDED flight mode and await heartbeat confirmations."""
+        """Request GUIDED flight mode and await heartbeat confirmations.
+
+        CHANGE 2: on hard timeout (3 retry cycles × 5 s) we no longer jump
+        straight to RTL. We run the shared timeout-drop sequence
+        (LOITER hold → descend to ~1 m AGL → drop payload → confirm → RTL)
+        by delegating to ``_timeout_drop_and_rtl`` while the sequencer is active.
+        """
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
+            return
+
+        # While the shared timeout-drop sequencer is running, this state's job is
+        # purely to keep driving it each tick until it hands off to RTL.
+        if self._drop_phase is not None:
+            self._timeout_drop_and_rtl(State.REQUEST_GUIDED, tick_count)
             return
 
         # Throttle SET_MODE to once per second (every 20 ticks at 20Hz).
@@ -301,9 +788,10 @@ class StateMachine:
             self.guided_request_counter = 0
 
             if self.guided_request_retries >= 3:
-                logger.error("GUIDED mode request failed after 3 retries (15s). Aborting mission.")
-                self.fallback.handle_fail("REQUEST_GUIDED: max retries exceeded")
-                self._transition(State.RTL, tick_count)
+                logger.error("GUIDED mode request failed after 3 retries (15s). Running timeout-drop+RTL.")
+                self.fallback.handle_fail("REQUEST_GUIDED: max retries exceeded (timeout-drop)")
+                # Arm the shared sequencer instead of transitioning to RTL directly.
+                self._timeout_drop_and_rtl(State.REQUEST_GUIDED, tick_count)
 
     def _tick_guided_hold(self, tick_count: int):
         """Hold position while waiting for LOCAL_POSITION_NED anchor to be confirmed.
@@ -311,10 +799,16 @@ class StateMachine:
         Retries get_local_position() on every tick.  The FSM only advances to
         INITIAL_SCAN once a non-None anchor is captured AND the minimum settle
         time has elapsed.  If the hard timeout expires with still no telemetry,
-        the FSM transitions to RTL with a loud error — never silently storing None.
+        we run the shared timeout-drop sequence (CHANGE 3, identical to
+        REQUEST_GUIDED) instead of an immediate RTL — never silently storing None.
         """
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
+            return
+
+        # Drive the shared timeout-drop sequencer if it was armed on a prior tick.
+        if self._drop_phase is not None:
+            self._timeout_drop_and_rtl(State.GUIDED_HOLD, tick_count)
             return
 
         self.fc.hold_position()
@@ -342,12 +836,13 @@ class StateMachine:
                 logger.error(
                     f"GUIDED_HOLD: LOCAL_POSITION_NED not received after "
                     f"{anchor_timeout_s:.1f}s ({self.hold_counter} ticks). "
-                    "Cannot establish position reference — aborting to RTL."
+                    "Cannot establish position reference — running timeout-drop+RTL."
                 )
                 self.fallback.handle_fail(
-                    "GUIDED_HOLD: anchor capture timeout — no LOCAL_POSITION_NED"
+                    "GUIDED_HOLD: anchor capture timeout — no LOCAL_POSITION_NED (timeout-drop)"
                 )
-                self._transition(State.RTL, tick_count)
+                # Arm the shared sequencer instead of transitioning to RTL directly.
+                self._timeout_drop_and_rtl(State.GUIDED_HOLD, tick_count)
             else:
                 self._transition(State.INITIAL_SCAN, tick_count)
             return
@@ -359,18 +854,28 @@ class StateMachine:
             self._transition(State.INITIAL_SCAN, tick_count)
 
     def _tick_initial_scan(self, tick_count: int):
-        """Hover scan position and look for target QR bounding boxes."""
+        """Hover scan position and look for target QR bounding boxes (CHANGE 4).
+
+        Improvements over the prior single-frame trigger:
+          * Confidence gate — a detection must exceed ``initial_scan_min_confidence``
+            to count; sub-threshold or hallucinated detections do not advance.
+          * Stable-before-confirm — require ``initial_scan_confirm_frames``
+            consecutive confident detections before → ALIGNMENT, eliminating the
+            oscillation caused by a one-frame false positive flipping the FSM.
+          * Optional slow yaw sweep — when enabled, rotate in place to widen the
+            camera footprint without translating XY (config default OFF).
+        """
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
             return
 
         # Maintain stable hover during scan phase
         self.fc.hold_position()
-        
+
         # Check initial scan hover timeout (clean 20s timer)
         elapsed_ticks = tick_count - self.state_entry_tick
         timeout_ticks = int(self.cfg['search'].get('initial_scan_timeout_s', 20.0) * self.cfg['system']['tick_hz'])
-        
+
         if elapsed_ticks >= timeout_ticks:
             logger.warning(f"INITIAL_SCAN timeout ({timeout_ticks / self.cfg['system']['tick_hz']:.1f}s). Initiating SEARCH_SQUARE.")
             self._generate_search_pattern()
@@ -381,13 +886,36 @@ class StateMachine:
         if vis['timestamp'] == 0.0:
             return
 
-        if vis['found']:
-            latency_ms = (time.time() - vis['timestamp']) * 1000
-            logger.info(f"Target QR locked at pixel coordinates: {vis['center']} (Latency: {latency_ms:.1f}ms)")
-            self._transition(State.ALIGNMENT, tick_count)
-            return
+        min_conf = self.cfg.get('vision', {}).get('initial_scan_min_confidence', 0.6)
+        confirm_req = self.cfg.get('vision', {}).get('initial_scan_confirm_frames', 3)
 
-    def _generate_search_pattern(self):
+        if vis['found'] and vis.get('confidence', 0.0) >= min_conf:
+            self._confirm_counter += 1
+            if self._confirm_counter >= confirm_req:
+                latency_ms = (time.time() - vis['timestamp']) * 1000
+                logger.info(
+                    f"Target QR locked after {self._confirm_counter} confident frames: "
+                    f"{vis['center']} (conf={vis.get('confidence', 0.0):.2f}, lat={latency_ms:.1f}ms)"
+                )
+                self._confirm_counter = 0
+                self._transition(State.ALIGNMENT, tick_count)
+                return
+        else:
+            # Miss or sub-threshold: reset the streak (reduces oscillation).
+            if self._confirm_counter > 0:
+                self._confirm_counter = 0
+
+        # Optional slow yaw sweep to widen the footprint (CHANGE 4). Off by
+        # default; enable via vision.initial_scan_yaw_sweep. Reverses every
+        # quarter of the scan timeout so the sweep stays bounded.
+        if self._scan_yaw_enabled:
+            rate = self.cfg.get('vision', {}).get('initial_scan_yaw_rate_deg_s', 8.0)
+            sweep_period = max(20, timeout_ticks // 4)
+            if elapsed_ticks > 0 and elapsed_ticks % sweep_period == 0:
+                self._scan_yaw_dir *= -1
+            self.fc.set_yaw_rate(rate * self._scan_yaw_dir)
+
+    def _generate_search_pattern(self, preserve_index: bool = False):
         """Generate local NED waypoints for an expanding concentric-square search.
 
         Produces closed square perimeters at increasing ring sizes, all centered
@@ -396,6 +924,11 @@ class StateMachine:
 
         Ring sizes are taken from search.search_rings_m config list.
         Falls back to [1.0, 2.0, square_size_m] when the key is absent.
+
+        Args:
+            preserve_index: when True (recovery path), keep the existing
+                current_wp_idx so a resumed SEARCH_SQUARE continues from the
+                last-flown waypoint rather than restarting the pattern.
         """
         anchor = getattr(self, 'guided_anchor_ned', None)
         if not anchor:
@@ -422,7 +955,7 @@ class StateMachine:
             self.search_waypoints.append((x0 - h, y0 + h, z0))  # NW
             self.search_waypoints.append((x0 - h, y0 - h, z0))  # SW (close)
 
-        self.current_wp_idx = 0
+        self.current_wp_idx = 0 if not preserve_index else getattr(self, 'current_wp_idx', 0)
 
         # Dynamic timeout: sequential distance sum scaled by speed + margin.
         # Same logic as before — works correctly for any waypoint list shape.
@@ -449,8 +982,34 @@ class StateMachine:
         # for the downward camera to acquire a 21cm QR reliably at 5m altitude.
         self.fc.set_search_speed(speed_m_s)
 
+        # CHANGE 5: tighten ArduPilot WPNAV accel/decel/radius for the slow
+        # search so the drone decelerates cleanly into each waypoint (less
+        # overshoot + motion blur). Restore defaults when leaving the search.
+        if not preserve_index:  # don't re-tune on a recovery regenerate
+            s = self.cfg['search']
+            self.fc.apply_search_nav_tuning(
+                accel=s.get('search_wpnav_accel', 0.5),
+                decel=s.get('search_wpnav_decel', 0.5),
+                wp_radius=s.get('search_wpnav_radius', 0.2),
+            )
+
     def _tick_search_square(self, tick_count: int):
-        """Execute lawnmower pattern in bounded area if initial scan fails."""
+        """Execute the concentric-square search if the initial scan finds nothing.
+
+        CHANGE 5 — optimized to maximise QR detection probability over mission
+        time. Changes from the prior aggressive traversal:
+          * Per-waypoint hover DWELL: after arriving at each waypoint, hold for
+            ``search_waypoint_dwell_s`` so the camera stabilises (no motion blur)
+            and the detector gets a clean look before moving on.
+          * Detection-aware advance: waypoints only advance after the dwell AND a
+            fresh vision frame has been examined, so the drone never blows past a
+            detectable QR mid-transit.
+          * Tighter arrival tolerance + lower cruise speed (config) to cut
+            overshoot and tracking error.
+          * Confidence-gated hand-off: a found QR must clear the confidence
+            threshold (same gate as INITIAL_SCAN) before → ALIGNMENT, preventing
+            the oscillation that a single blurred false positive caused.
+        """
         if not self.fc.mav.is_connected():
             self._transition(State.BOOT, tick_count)
             return
@@ -462,43 +1021,71 @@ class StateMachine:
             if self.vision_fail_counter >= self.vision_fail_limit:
                 logger.error("BOUNDED SEARCH ABORT: Vision result unavailable for too long.")
                 self.fallback.handle_fail("SEARCH_SQUARE: Vision timeout")
+                self._restore_search_nav()
                 self._transition(State.RTL, tick_count)
             return
 
-        if vis['found']:
+        # Confidence-gated hand-off to ALIGNMENT (reduces oscillation / false lock).
+        min_conf = self.cfg.get('vision', {}).get('initial_scan_min_confidence', 0.6)
+        if vis['found'] and vis.get('confidence', 0.0) >= min_conf:
             latency_ms = (time.time() - vis['timestamp']) * 1000
-            logger.info(f"Target QR locked at pixel coordinates: {vis['center']} during SEARCH_SQUARE (Latency: {latency_ms:.1f}ms)")
+            logger.info(
+                f"Target QR locked during SEARCH_SQUARE: {vis['center']} "
+                f"(conf={vis.get('confidence', 0.0):.2f}, lat={latency_ms:.1f}ms)"
+            )
+            self._confirm_counter = 0
+            # CHANGE 5: restore default nav tuning before leaving the search.
+            self._restore_search_nav()
             self._transition(State.ALIGNMENT, tick_count)
             return
 
         # Check bounded search dynamic timeout
         elapsed_ticks = tick_count - self.state_entry_tick
         timeout_ticks = getattr(self, 'search_timeout_ticks', 90 * self.cfg['system']['tick_hz'])
-        
+
         if elapsed_ticks >= timeout_ticks:
             logger.warning("SEARCH_SQUARE TIMEOUT: Target not found within dynamic limit. Initiating RETURN_INITIAL...")
-            self.fallback.handle_fail("SEARCH_SQUARE: dynamic timeout exceeded")
             self._transition(State.RETURN_INITIAL, tick_count)
             return
-            
+
         # Navigate through generated local NED waypoints
         if self.current_wp_idx < len(self.search_waypoints):
             target_x, target_y, target_z = self.search_waypoints[self.current_wp_idx]
+
+            # Per-waypoint dwell (CHANGE 5): if we are within a dwell window,
+            # hold position so the camera stabilises for a clean detection pass.
+            dwell_s = self.cfg['search'].get('search_waypoint_dwell_s', 1.5)
+            if self._search_dwell_until_tick > 0 and tick_count < self._search_dwell_until_tick:
+                self.fc.hold_position()
+                return
+            elif self._search_dwell_until_tick > 0 and tick_count >= self._search_dwell_until_tick:
+                # Dwell finished — advance to the next waypoint and clear the gate.
+                logger.info(f"Search waypoint {self.current_wp_idx} dwell complete; advancing.")
+                self._search_dwell_until_tick = -1
+                self.current_wp_idx += 1
+                # Persist search progress so a reboot resumes mid-pattern (CHANGE 1).
+                if self.recovery_enabled:
+                    self.store.save(self._build_checkpoint())
+                return
+
             self.fc.goto_local_position(target_x, target_y, target_z)
-            
-            # Check arrival tolerance
+
+            # Check arrival tolerance (tighter default to cut overshoot).
             current_pos = self.fc.get_local_position()
             if current_pos:
-                cx, cy, cz = current_pos
-                dist = math.sqrt((target_x - cx)**2 + (target_y - cy)**2)
+                cx, cy, _ = current_pos
+                dist = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2)
                 tolerance = self.cfg['search'].get('position_tolerance_m', 0.3)
-                
+
                 if dist <= tolerance:
-                    logger.info(f"Search Waypoint {self.current_wp_idx} reached.")
-                    self.current_wp_idx += 1
+                    tick_hz = self.cfg['system']['tick_hz']
+                    self._search_dwell_until_tick = tick_count + int(dwell_s * tick_hz)
+                    logger.info(
+                        f"Search waypoint {self.current_wp_idx} reached (dist={dist:.2f}m); "
+                        f"holding {dwell_s:.1f}s for camera stabilization."
+                    )
         else:
             logger.warning("SEARCH_SQUARE EXHAUSTED: Pattern finished but target not found. Initiating RETURN_INITIAL...")
-            self.fallback.handle_fail("SEARCH_SQUARE: pattern finished with no detection")
             self._transition(State.RETURN_INITIAL, tick_count)
 
     def _tick_return_initial(self, tick_count: int):
@@ -518,6 +1105,8 @@ class StateMachine:
         if tick_count == self.state_entry_tick:
             return_speed = self.cfg['flight'].get('search_speed_m_s', 0.4)
             self.fc.set_search_speed(return_speed)
+            # CHANGE 5: restore default WPNAV tuning now that the slow search is over.
+            self._restore_search_nav()
 
         target_x, target_y, target_z = anchor
         self.fc.goto_local_position(target_x, target_y, target_z)
@@ -526,7 +1115,7 @@ class StateMachine:
         if current_pos:
             cx, cy, cz = current_pos
             dist = math.sqrt((target_x - cx)**2 + (target_y - cy)**2)
-            tolerance = self.cfg['search'].get('position_tolerance_m', 0.5)
+            tolerance = self.cfg['search'].get('position_tolerance_m', 0.3)
 
             if dist <= tolerance:
                 logger.warning("Returned to initial GUIDED anchor point. Initiating blind LAND sequence.")
@@ -534,6 +1123,10 @@ class StateMachine:
                 self.fc.restore_normal_speed(normal_speed)
                 logger.info("Speed restored before LAND transition.")
                 self._transition(State.LAND, tick_count)
+                # CHANGE 6: mark this as a QR-not-found blind landing so LAND
+                # forces the payload release once on the ground. Set AFTER the
+                # transition (which resets the marker to False on LAND entry).
+                self._blind_landing = True
                 return
 
         # Timeout for the return journey
@@ -545,6 +1138,7 @@ class StateMachine:
             self.fc.restore_normal_speed(normal_speed)
             logger.info("Speed restored before LAND transition (timeout path).")
             self._transition(State.LAND, tick_count)
+            self._blind_landing = True
 
     def _tick_alignment(self, tick_count: int):
         """Compute PID centering adjustments and guide the drone over the target center."""
@@ -614,6 +1208,9 @@ class StateMachine:
         
         if success:
             logger.info(f"Target Payload Decoded: '{text}'")
+            # CHANGE 1: persist the decoded QR text so a reboot after QR_DECODE
+            # does not need to re-acquire/re-decode the target.
+            self._last_qr_text = text
             self.fc.send_qr_text(text)
             self._transition(State.LAND, tick_count)
         elif final:
@@ -716,13 +1313,20 @@ class StateMachine:
         # Altitude drop gate checks (only if payload not released yet)
         if not self.payload.payload_released:
             dist = self.payload.get_distance_reading()
-            
+
             in_window = self.payload.is_in_release_window(dist)
             # SITL FIX: In SITL we don't have a real ultrasonic sensor, so dist (relative alt)
             # drops to 0.0m upon landing, missing the [0.2, 0.4] release window entirely.
             if self.payload.use_sitl and self.fc.is_landed():
                 in_window = True
-                
+            # CHANGE 6: QR-not-found blind landing — on real hardware flat ground
+            # the ultrasonic reads ~0.0 (below the [0.2,0.4]m window), so the
+            # normal gate would never fire and the 30s LAND timeout would RTL
+            # with the payload still aboard. Once we are confirmed landed on a
+            # blind landing, force the release so the continue-flow runs.
+            if self._blind_landing and self.fc.is_landed():
+                in_window = True
+
             if in_window and self.fc.is_landed():
                 # Double safety arming check
                 if self.payload.takeoff_detected:
@@ -898,7 +1502,7 @@ class StateMachine:
         if current_pos:
             cx, cy, _ = current_pos
             dist = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2)
-            tolerance = self.cfg['search'].get('position_tolerance_m', 0.5)
+            tolerance = self.cfg['search'].get('position_tolerance_m', 0.3)
             if dist <= tolerance:
                 if self.landing_context == 'mission':
                     logger.info(

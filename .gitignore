@@ -1,5 +1,9 @@
 __pycache__/
 *.py[cod]
 drone_venv/
+test_venv/
 *.log
 force_update.sh
+# Runtime crash-recovery checkpoint (CHANGE 1) — a live artifact, not source.
+mission_state.json
+.mission_state.*.tmp

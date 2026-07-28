@@ -41,6 +41,7 @@ class VisionPipeline:
             'aligned': False,
             'vx': 0.0,
             'vy': 0.0,
+            'confidence': 0.0,
             'decode_success': False,
             'decode_text': None,
             'decode_final': False
@@ -107,9 +108,14 @@ class VisionPipeline:
                 mode = self.detection_mode
             if mode == 'platform' and self.platform_det is not None:
                 found, bbox, center = self.platform_det.detect(frame)
+                # Platform (ArUco) detections are ID-verified, so a found marker is
+                # already high-confidence; QR confidence scoring doesn't apply here.
+                confidence = 1.0 if found else 0.0
             else:
                 found, bbox, center = self.qr_det.detect(frame)
-            
+                # CHANGE 4: propagate the detector's fused confidence score.
+                confidence = self.qr_det.last_confidence if found else 0.0
+
             aligned = False
             vx, vy = 0.0, 0.0
             decode_success = False
@@ -163,6 +169,7 @@ class VisionPipeline:
                     'aligned': aligned,
                     'vx': vx,
                     'vy': vy,
+                    'confidence': confidence,
                     'decode_success': decode_success,
                     'decode_text': decode_text,
                     'decode_final': decode_final

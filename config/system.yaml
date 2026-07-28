@@ -6,3 +6,16 @@ system:
   tick_hz: 20          # FSM update rate in Hz
   use_sitl: true    # true → connect to tcp:127.0.0.1:5762 (SITL); false → serial port
   show_gui: true      # true → open OpenCV preview window (requires display)
+
+# ── CHANGE 1: crash recovery ──────────────────────────────────────────────
+# Mission checkpoint persistence + resume-after-reboot policy.
+# A checkpoint is written atomically after every FSM transition and after key
+# variable changes (anchor, true_home, payload status, QR text, search progress).
+# On a mid-flight reboot the FSM validates the checkpoint against live telemetry
+# and resumes from the last safe state; if unsafe or absent it falls back to RTL.
+recovery:
+  enabled: true                          # master switch; false → revert to always-RTL-on-reboot
+  checkpoint_file: "mission_state.json"  # on-disk checkpoint path (relative to CWD)
+  max_checkpoint_age_s: 180.0            # checkpoints older than this are ignored (stale context)
+  timeout_drop_altitude_m: 1.0           # AGL target for the CHANGES 2/3 timeout-drop descent
+  release_confirm_timeout_s: 5.0         # max wait for payload release confirmation before RTL

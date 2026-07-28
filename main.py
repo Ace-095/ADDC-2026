@@ -61,6 +61,7 @@ from core.state_machine import StateMachine
 from core.payload_control import PayloadControl
 from core.fallback_manager import FallbackManager
 from core.system_monitor import SystemMonitor
+from core.mission_store import MissionStore
 from vision.camera_manager import CameraManager
 from vision.qr_detector import QRDetector
 from vision.alignment_controller import AlignmentController
@@ -124,6 +125,12 @@ class DroneSystem:
         self.fallback_manager = FallbackManager(self.flight_control)
         self.system_monitor = SystemMonitor(self.config)
 
+        # CHANGE 1: crash-recovery checkpoint store (atomic JSON persistence).
+        recovery_cfg = self.config.get('recovery', {})
+        self.mission_store = MissionStore(
+            recovery_cfg.get('checkpoint_file', 'mission_state.json')
+        )
+
         self.payload_control = PayloadControl(self.config, self.flight_control)
         
         self.camera = CameraManager(
@@ -173,7 +180,8 @@ class DroneSystem:
             flight_control=self.flight_control,
             vision_pipeline=self.vision_pipeline,
             payload_control=self.payload_control,
-            fallback_manager=self.fallback_manager
+            fallback_manager=self.fallback_manager,
+            mission_store=self.mission_store
         )
         
         logger.info("Subsystems initialized successfully.")

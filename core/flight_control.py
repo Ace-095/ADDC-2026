@@ -89,14 +89,31 @@ class FlightControl:
         # MAV_CMD_DO_SET_MODE = 176
         # param1 = 1 (MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
         # param2 = 4 (ArduPilot GUIDED Custom Mode ID)
+        return self.set_mode(4)
+
+    def set_mode(self, custom_mode: int) -> bool:
+        """Request an ArduCopter custom flight mode by ID.
+
+        Centralises MAV_CMD_DO_SET_MODE so LOITER (5), LAND (9), RTL (6), etc.
+        can be requested uniformly. ArduCopter custom_mode IDs:
+            0 STABILIZE | 1 ACRO | 2 ALT_HOLD | 3 AUTO | 4 GUIDED
+            5 LOITER    | 6 RTL  | 7 CIRCLE   | 9 LAND  | 18 BRAKE
+
+        Args:
+            custom_mode: ArduCopter custom_mode integer.
+        """
         success = self.mav.send_command_long(
             mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            param1=1.0,
-            param2=4.0
+            param1=1.0,   # MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+            param2=float(custom_mode),
         )
         if success:
-            logger.info("MAV_CMD_DO_SET_MODE (GUIDED) commanded.")
+            logger.info(f"MAV_CMD_DO_SET_MODE (custom_mode={custom_mode}) commanded.")
         return success
+
+    def set_loiter_mode(self) -> bool:
+        """Request LOITER — GPS position + altitude hold (safe hover hold)."""
+        return self.set_mode(5)
 
     def hold_position(self) -> bool:
         """Command the drone to hover in place with zero horizontal/vertical velocity."""
@@ -112,6 +129,13 @@ class FlightControl:
             vz: Down/descend velocity (m/s)
         """
         return self.mav.set_guided_velocity(vx, vy, vz)
+
+    def set_yaw_rate(self, yaw_rate_deg_s: float) -> bool:
+        """Command a body yaw rate (deg/s) in GUIDED while holding XY + altitude.
+
+        Used by the INITIAL_SCAN slow yaw-sweep (CHANGE 4). Positive = clockwise.
+        """
+        return self.mav.set_guided_yaw_rate(yaw_rate_deg_s)
 
     def goto_local_position(self, x: float, y: float, z: float) -> bool:
         """
@@ -167,6 +191,38 @@ class FlightControl:
         else:
             logger.warning(f"Failed to restore normal speed to {speed_m_s:.2f} m/s.")
         return success
+
+    # ── CHANGE 5: search navigation accel/decel tuning ────────────────────
+    # ArduPilot WPNAV parameters govern GUIDED position-target tracking.
+    # Tighter accel/decel + a low cruise speed cut overshoot, tracking error,
+    # and motion blur — the real reasons the QR detector could not lock during
+    # the search. These are written at SEARCH_SQUARE entry and restored on exit
+    # so the rest of the mission keeps default WPNAV behaviour.
+    _SEARCH_NAV_PARAMS = {
+        'WPNAV_SPEED':    ('speed', None),     # capped via DO_CHANGE_SPEED instead
+        'WPNAV_ACCEL':    ('accel', None),
+        'WPNAV_DECEL':    ('decel', None),
+        'WPNAV_RADIUS':   ('wp_radius', None),
+    }
+
+    def apply_search_nav_tuning(self, accel: float, decel: float, wp_radius: float) -> None:
+        """Tighten ArduPilot WPNAV accel/decel/radius for the slow search pattern.
+
+        Best-effort: each PARAM_SET is fire-and-forget (ArduPilot applies it on
+        the next control cycle). Failures are logged, not fatal — the DO_CHANGE_SPEED
+        groundspeed cap is the primary motion control and still applies.
+        """
+        self.mav.set_param('WPNAV_ACCEL', float(accel))
+        self.mav.set_param('WPNAV_DECEL', float(decel))
+        self.mav.set_param('WPNAV_RADIUS', float(wp_radius))
+        logger.info(f"Search nav tuning applied: accel={accel} decel={decel} radius={wp_radius}")
+
+    def restore_default_nav_tuning(self, accel: float, decel: float, wp_radius: float) -> None:
+        """Restore ArduPilot WPNAV params to their mission defaults after search."""
+        self.mav.set_param('WPNAV_ACCEL', float(accel))
+        self.mav.set_param('WPNAV_DECEL', float(decel))
+        self.mav.set_param('WPNAV_RADIUS', float(wp_radius))
+        logger.info(f"Default nav tuning restored: accel={accel} decel={decel} radius={wp_radius}")
 
     def get_local_position(self) -> Optional[tuple]:
         """

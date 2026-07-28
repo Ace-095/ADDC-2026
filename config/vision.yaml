@@ -18,3 +18,17 @@ vision:
   search_pattern_enabled: true  # Enable spiral/search pattern when QR not found
   stabilization_strength: 0.8   # Image stabilisation blend factor [0.0–1.0]
   fusion_enabled: true          # Fuse QR and optical-flow position estimates
+
+  # ── CHANGE 4: initial-scan confirmation gate ────────────────────────────
+  # A QR is only accepted after N consecutive frames whose fused confidence
+  # (decode + size-margin + temporal-consistency) exceeds the threshold. This
+  # kills single-frame false positives that previously oscillated the FSM in
+  # and out of ALIGNMENT.
+  initial_scan_min_confidence: 0.6   # [0–1] confidence a detection must reach to count
+  initial_scan_confirm_frames: 3     # consecutive confident frames required to → ALIGNMENT
+
+  # Optional slow in-place yaw sweep during INITIAL_SCAN to widen the camera
+  # footprint without translating XY. Default OFF (hover); enable only if the
+  # mount/mission calls for a wider initial look.
+  initial_scan_yaw_sweep: false
+  initial_scan_yaw_rate_deg_s: 8.0   # yaw rate when sweep is enabled (deg/s)

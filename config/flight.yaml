@@ -12,8 +12,10 @@ flight:
   # At 5m AGL with 66° FOV the camera footprint is ~4.4m wide.
   # At 0.4 m/s the drone takes ~11s to cross it (220 frames at 20Hz).
   # At the autopilot default (~3 m/s) it takes ~1.5s — too fast for reliable QR detection.
-  # Increase search_speed_m_s only after confirming detection works at the current value in SITL.
-  search_speed_m_s: 0.4               # Groundspeed during SEARCH_SQUARE and RETURN_INITIAL (m/s)
+  # CHANGE 5: lowered to 0.25 m/s — at this speed the camera footprint is crossed
+  # in ~17.6s (352 frames), giving the detector far more acquisition opportunities
+  # per waypoint and drastically reducing motion blur on a 21cm QR at 5m AGL.
+  search_speed_m_s: 0.25              # Groundspeed during SEARCH_SQUARE and RETURN_INITIAL (m/s)
   normal_speed_m_s: 3.0               # Speed restored after RETURN_INITIAL completes, before RTL (m/s)
 
   # Payload safe-drop altitude window (measured by ultrasonic sensor from ground)
@@ -30,7 +32,21 @@ search:
   search_rings_m: [1.0, 2.0, 3.0]    # Concentric ring side-lengths (m), walked inner-first
   initial_scan_timeout_s: 20.0       # hover-scan duration before bounded search
   lane_overlap_pct: 0.20             # [UNUSED — lawnmower removed] kept for reference if reverting
-  position_tolerance_m: 0.3          # arrival tolerance for position setpoints
-  search_timeout_s: 90.0             # hard cap for bounded search phase
+  position_tolerance_m: 0.2          # arrival tolerance for position setpoints (CHANGE 5: tighter 0.3→0.2)
   post_release_climb_altitude_m: 3.0  # ascend target post payload release (m)
   post_release_return_speed_m_s: 1.0  # groundspeed for RETURN_TO_ORIGIN leg (m/s)
+
+  # ── CHANGE 5: search motion tuning ─────────────────────────────────────
+  # Per-waypoint hover dwell so the camera stabilises (kills motion blur) and
+  # the detector gets a clean, stationary look before the next transit.
+  search_waypoint_dwell_s: 1.5
+  # ArduPilot WPNAV params applied at SEARCH_SQUARE entry and restored on exit.
+  # Tighter accel/decel cut overshoot & delayed stopping; a small waypoint
+  # radius makes arrival detection responsive. Defaults restored afterward so
+  # the climb/return legs keep normal ArduPilot behaviour.
+  search_wpnav_accel: 0.5            # m/s^2 during search (default WPNAV_ACCEL ~3.0)
+  search_wpnav_decel: 0.5            # m/s^2 during search (default WPNAV_DECEL ~3.0)
+  search_wpnav_radius: 0.2           # waypoint acceptance radius during search (m)
+  default_wpnav_accel: 3.0           # restored when leaving the search
+  default_wpnav_decel: 3.0
+  default_wpnav_radius: 0.3
